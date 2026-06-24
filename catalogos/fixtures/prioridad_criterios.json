@@ -1,0 +1,210 @@
+[
+  {
+    "model": "catalogos.prioridadcriterio",
+    "pk": 1,
+    "fields": {
+      "nivel": "Alta",
+      "descripcionCriterio": "Posible corrupción, denuncia, falta administrativa o delito",
+      "fechaRegistro": null,
+      "fechaModificacion": null,
+      "idUsuarioRegistra": null,
+      "idUsuarioModifica": null,
+      "activo": 1
+    }
+  },
+  {
+    "model": "catalogos.prioridadcriterio",
+    "pk": 2,
+    "fields": {
+      "nivel": "Alta",
+      "descripcionCriterio": "Solicitud directa a la persona Titular sobre asunto sensible",
+      "fechaRegistro": null,
+      "fechaModificacion": null,
+      "idUsuarioRegistra": null,
+      "idUsuarioModifica": null,
+      "activo": 1
+    }
+  },
+  {
+    "model": "catalogos.prioridadcriterio",
+    "pk": 3,
+    "fields": {
+      "nivel": "Alta",
+      "descripcionCriterio": "Riesgo jurídico, administrativo, político, mediático, operativo o de seguridad",
+      "fechaRegistro": null,
+      "fechaModificacion": null,
+      "idUsuarioRegistra": null,
+      "idUsuarioModifica": null,
+      "activo": 1
+    }
+  },
+  {
+    "model": "catalogos.prioridadcriterio",
+    "pk": 4,
+    "fields": {
+      "nivel": "Alta",
+      "descripcionCriterio": "Plazo urgente",
+      "fechaRegistro": null,
+      "fechaModificacion": null,
+      "idUsuarioRegistra": null,
+      "idUsuarioModifica": null,
+      "activo": 1
+    }
+  },
+  {
+    "model": "catalogos.prioridadcriterio",
+    "pk": 5,
+    "fields": {
+      "nivel": "Alta",
+      "descripcionCriterio": "Posible afectación a derechos, recursos públicos o imagen institucional",
+      "fechaRegistro": null,
+      "fechaModificacion": null,
+      "idUsuarioRegistra": null,
+      "idUsuarioModifica": null,
+      "activo": 1
+    }
+  },
+  {
+    "model": "catalogos.prioridadcriterio",
+    "pk": 6,
+    "fields": {
+      "nivel": "Media",
+      "descripcionCriterio": "Sea relevante para la gestión institucional",
+      "fechaRegistro": null,
+      "fechaModificacion": null,
+      "idUsuarioRegistra": null,
+      "idUsuarioModifica": null,
+      "activo": 1
+    }
+  },
+  {
+    "model": "catalogos.prioridadcriterio",
+    "pk": 7,
+    "fields": {
+      "nivel": "Media",
+      "descripcionCriterio": "Requiera análisis o canalización",
+      "fechaRegistro": null,
+      "fechaModificacion": null,
+      "idUsuarioRegistra": null,
+      "idUsuarioModifica": null,
+      "activo": 1
+    }
+  },
+  {
+    "model": "catalogos.prioridadcriterio",
+    "pk": 8,
+    "fields": {
+      "nivel": "Media",
+      "descripcionCriterio": "No tenga riesgo inmediato",
+      "fechaRegistro": null,
+      "fechaModificacion": null,
+      "idUsuarioRegistra": null,
+      "idUsuarioModifica": null,
+      "activo": 1
+    }
+  },
+  {
+    "model": "catalogos.prioridadcriterio",
+    "pk": 9,
+    "fields": {
+      "nivel": "Media",
+      "descripcionCriterio": "No exija decisión urgente de la persona Titular",
+      "fechaRegistro": null,
+      "fechaModificacion": null,
+      "idUsuarioRegistra": null,
+      "idUsuarioModifica": null,
+      "activo": 1
+    }
+  },
+  {
+    "model": "catalogos.prioridadcriterio",
+    "pk": 10,
+    "fields": {
+      "nivel": "Media",
+      "descripcionCriterio": "Pueda resolverse por un área competente con seguimiento de la Oficina Particular",
+      "fechaRegistro": null,
+      "fechaModificacion": null,
+      "idUsuarioRegistra": null,
+      "idUsuarioModifica": null,
+      "activo": 1
+    }
+  },
+  {
+    "model": "catalogos.prioridadcriterio",
+    "pk": 11,
+    "fields": {
+      "nivel": "Media",
+      "descripcionCriterio": "Acceso a instalaciones, información o decisiones estratégicas",
+      "fechaRegistro": null,
+      "fechaModificacion": null,
+      "idUsuarioRegistra": null,
+      "idUsuarioModifica": null,
+      "activo": 1
+    }
+  },
+  {
+    "model": "catalogos.prioridadcriterio",
+    "pk": 12,
+    "fields": {
+      "nivel": "Baja",
+      "descripcionCriterio": "Sea informativa, protocolaria o de cortesía",
+      "fechaRegistro": null,
+      "fechaModificacion": null,
+      "idUsuarioRegistra": null,
+      "idUsuarioModifica": null,
+      "activo": 1
+    }
+  },
+  {
+    "model": "catalogos.prioridadcriterio",
+    "pk": 13,
+    "fields": {
+      "nivel": "Baja",
+      "descripcionCriterio": "No implique riesgo institucional",
+      "fechaRegistro": null,
+      "fechaModificacion": null,
+      "idUsuarioRegistra": null,
+      "idUsuarioModifica": null,
+      "activo": 1
+    }
+  },
+  {
+    "model": "catalogos.prioridadcriterio",
+    "pk": 14,
+    "fields": {
+      "nivel": "Baja",
+      "descripcionCriterio": "No tenga plazo crítico",
+      "fechaRegistro": null,
+      "fechaModificacion": null,
+      "idUsuarioRegistra": null,
+      "idUsuarioModifica": null,
+      "activo": 1
+    }
+  },
+  {
+    "model": "catalogos.prioridadcriterio",
+    "pk": 15,
+    "fields": {
+      "nivel": "Baja",
+      "descripcionCriterio": "No requiera intervención de la persona Titular",
+      "fechaRegistro": null,
+      "fechaModificacion": null,
+      "idUsuarioRegistra": null,
+      "idUsuarioModifica": null,
+      "activo": 1
+    }
+  },
+  {
+    "model": "catalogos.prioridadcriterio",
+    "pk": 16,
+    "fields": {
+      "nivel": "Baja",
+      "descripcionCriterio": "Pueda responderse con formato estándar, canalizarse o archivarse",
+      "fechaRegistro": null,
+      "fechaModificacion": null,
+      "idUsuarioRegistra": null,
+      "idUsuarioModifica": null,
+      "activo": 1
+    }
+  }
+]

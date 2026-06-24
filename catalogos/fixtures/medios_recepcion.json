@@ -1,0 +1,119 @@
+[
+  {
+    "model": "catalogos.mediorecepcion",
+    "pk": 1,
+    "fields": {
+      "nombreMedio": "WhatsApp",
+      "paraTurnado": 1,
+      "fechaRegistro": null,
+      "fechaModificacion": null,
+      "idUsuarioRegistra": null,
+      "idUsuarioModifica": null,
+      "activo": 1
+    }
+  },
+  {
+    "model": "catalogos.mediorecepcion",
+    "pk": 2,
+    "fields": {
+      "nombreMedio": "Llamada",
+      "paraTurnado": 1,
+      "fechaRegistro": null,
+      "fechaModificacion": null,
+      "idUsuarioRegistra": null,
+      "idUsuarioModifica": null,
+      "activo": 1
+    }
+  },
+  {
+    "model": "catalogos.mediorecepcion",
+    "pk": 3,
+    "fields": {
+      "nombreMedio": "Correo electrónico",
+      "paraTurnado": 1,
+      "fechaRegistro": null,
+      "fechaModificacion": null,
+      "idUsuarioRegistra": null,
+      "idUsuarioModifica": null,
+      "activo": 1
+    }
+  },
+  {
+    "model": "catalogos.mediorecepcion",
+    "pk": 4,
+    "fields": {
+      "nombreMedio": "Otro",
+      "paraTurnado": 1,
+      "fechaRegistro": null,
+      "fechaModificacion": null,
+      "idUsuarioRegistra": null,
+      "idUsuarioModifica": null,
+      "activo": 1
+    }
+  },
+  {
+    "model": "catalogos.mediorecepcion",
+    "pk": 5,
+    "fields": {
+      "nombreMedio": "Reunión",
+      "paraTurnado": 0,
+      "fechaRegistro": null,
+      "fechaModificacion": null,
+      "idUsuarioRegistra": null,
+      "idUsuarioModifica": null,
+      "activo": 1
+    }
+  },
+  {
+    "model": "catalogos.mediorecepcion",
+    "pk": 6,
+    "fields": {
+      "nombreMedio": "Recorrido",
+      "paraTurnado": 0,
+      "fechaRegistro": null,
+      "fechaModificacion": null,
+      "idUsuarioRegistra": null,
+      "idUsuarioModifica": null,
+      "activo": 1
+    }
+  },
+  {
+    "model": "catalogos.mediorecepcion",
+    "pk": 7,
+    "fields": {
+      "nombreMedio": "Solicitud en sitio",
+      "paraTurnado": 0,
+      "fechaRegistro": null,
+      "fechaModificacion": null,
+      "idUsuarioRegistra": null,
+      "idUsuarioModifica": null,
+      "activo": 1
+    }
+  },
+  {
+    "model": "catalogos.mediorecepcion",
+    "pk": 8,
+    "fields": {
+      "nombreMedio": "Redes sociales",
+      "paraTurnado": 0,
+      "fechaRegistro": null,
+      "fechaModificacion": null,
+      "idUsuarioRegistra": null,
+      "idUsuarioModifica": null,
+      "activo": 1
+    }
+  },
+  {
+    "model": "catalogos.mediorecepcion",
+    "pk": 9,
+    "fields": {
+      "nombreMedio": "Portal de transparencia",
+      "paraTurnado": 0,
+      "fechaRegistro": null,
+      "fechaModificacion": null,
+      "idUsuarioRegistra": null,
+      "idUsuarioModifica": null,
+      "activo": 1
+    }
+  }
+]
