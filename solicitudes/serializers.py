@@ -25,7 +25,7 @@ class SolicitanteExternoSerializer(serializers.ModelSerializer):
 class EvidenciaSerializer(serializers.ModelSerializer):
     class Meta:
         model  = Evidencia
-        fields = ['id', 'nombreArchivo', 'tipoMime', 'fechaCarga']
+        fields = ['id', 'nombreArchivo', 'tipoMime', 'fechaCarga', 'rutaArchivo']
 
 
 class FUSSerializer(serializers.ModelSerializer):
@@ -66,14 +66,30 @@ class NotificacionSerializer(serializers.ModelSerializer):
 
 
 class TurnadoSerializer(serializers.ModelSerializer):
-    idFus         = FUSSerializer(read_only=True)
-    idRemitente   = UserMiniSerializer(read_only=True)
+    idFus          = FUSSerializer(read_only=True)
+    idRemitente    = UserMiniSerializer(read_only=True)
     idDestinatario = UserMiniSerializer(read_only=True)
-    idMedio       = MedioMiniSerializer(read_only=True)
+    idMedio        = MedioMiniSerializer(read_only=True)
 
     class Meta:
         model  = Turnado
         fields = [
             'id', 'idFus', 'idRemitente', 'idDestinatario',
             'idMedio', 'solicitudTexto', 'fechaHoraTurnado', 'estatusTitular',
+        ]
+
+
+class TurnadoActividadSerializer(serializers.ModelSerializer):
+    idDestinatario = UserMiniSerializer(read_only=True)
+    idRemitente    = UserMiniSerializer(read_only=True)
+    idMedio        = MedioMiniSerializer(read_only=True)
+    seguimientos   = SeguimientoSerializer(many=True, read_only=True)
+    acciones       = AccionSerializer(many=True, read_only=True)
+
+    class Meta:
+        model  = Turnado
+        fields = [
+            'id', 'idDestinatario', 'idRemitente', 'idMedio',
+            'solicitudTexto', 'fechaHoraTurnado', 'estatusTitular',
+            'seguimientos', 'acciones',
         ]

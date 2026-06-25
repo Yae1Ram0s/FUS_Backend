@@ -14,7 +14,7 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from autenticacion.models import CorreoAutorizado
 from catalogos.models import MedioRecepcion
 from .models import FUS, SolicitanteExterno, Evidencia, Turnado, Seguimiento, Accion, Bitacora, Notificacion
-from .serializers import FUSSerializer, TurnadoSerializer, SeguimientoSerializer, AccionSerializer, NotificacionSerializer
+from .serializers import FUSSerializer, TurnadoSerializer, TurnadoActividadSerializer, SeguimientoSerializer, AccionSerializer, NotificacionSerializer
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -183,6 +183,23 @@ class TurnarFUSView(APIView):
              ip=ip, folio=fus.folio, estado_ant=estado_ant, estado_nuevo='Turnado')
 
         return Response({'detail': 'FUS turnado correctamente.'})
+
+
+# ── Actividad de un FUS (ROL1 solo lectura) ──────────────────────────────────
+
+class FUSActividadView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        fus = get_object_or_404(FUS, pk=pk, activo=1)
+        turnados = Turnado.objects.filter(
+            idFus=fus, activo=1
+        ).select_related(
+            'idDestinatario', 'idRemitente', 'idMedio',
+        ).prefetch_related(
+            'seguimientos', 'acciones',
+        ).order_by('fechaHoraTurnado')
+        return Response(TurnadoActividadSerializer(turnados, many=True).data)
 
 
 # ── Turnados (ROL2) ──────────────────────────────────────────────────────────

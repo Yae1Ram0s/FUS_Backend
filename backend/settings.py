@@ -25,7 +25,7 @@ SECRET_KEY = 'django-insecure-zrs6ovcn2*#)x)%7@^25d4enl7#i%i14jgen7mp_!!v)cp(4w!
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['*']
 
 
 # Application definition
@@ -112,9 +112,7 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 # CORS — permite que React se comunique con Django
-CORS_ALLOWED_ORIGINS = [
-    'http://localhost:5173',  # puerto de Vite
-]
+CORS_ALLOW_ALL_ORIGINS = True  # solo desarrollo local
 
 # JWT
 from datetime import timedelta
