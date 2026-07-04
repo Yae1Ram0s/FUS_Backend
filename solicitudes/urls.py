@@ -7,11 +7,15 @@ from .views import (
     MisTurnadosView,
     SeguimientoListCreateView,
     SeguimientoDeleteView,
-    AccionListCreateView,
-    AccionUpdateDeleteView,
     NotificacionListView,
     NotificacionMarcarLeidaView,
     NotificacionMarcarTodasView,
+    BitacoraListView,
+    ExportarFUSExcelView,
+    ExportarFUSPDFView,
+    ExportarBitacoraExcelView,
+    ExportarBitacoraPDFView,
+    DescargarFUSPDFView,
 )
 
 urlpatterns = [
@@ -28,12 +32,20 @@ urlpatterns = [
     path('turnados/<int:turnado_id>/seguimientos/', SeguimientoListCreateView.as_view(), name='seguimientos'),
     path('seguimientos/<int:pk>/',                  SeguimientoDeleteView.as_view(),     name='seguimiento-delete'),
 
-    # Acciones
-    path('turnados/<int:turnado_id>/acciones/', AccionListCreateView.as_view(),   name='acciones'),
-    path('acciones/<int:pk>/',                  AccionUpdateDeleteView.as_view(), name='accion-detail'),
-
     # Notificaciones (leer-todas debe ir antes que <uuid:pk>)
     path('notificaciones/',                         NotificacionListView.as_view(),        name='notificaciones'),
     path('notificaciones/leer-todas/',              NotificacionMarcarTodasView.as_view(), name='notificaciones-leer-todas'),
     path('notificaciones/<uuid:pk>/leer/',          NotificacionMarcarLeidaView.as_view(), name='notificacion-leer'),
+
+    # Bitácora
+    path('bitacora/',                          BitacoraListView.as_view(),          name='bitacora'),
+    path('bitacora/exportar/excel/',           ExportarBitacoraExcelView.as_view(), name='bitacora-exportar-excel'),
+    path('bitacora/exportar/pdf/',             ExportarBitacoraPDFView.as_view(),   name='bitacora-exportar-pdf'),
+
+    # Exportar FUS (lista)
+    path('fus/exportar/excel/',       ExportarFUSExcelView.as_view(),  name='fus-exportar-excel'),
+    path('fus/exportar/pdf/',         ExportarFUSPDFView.as_view(),    name='fus-exportar-pdf'),
+
+    # Descargar FUS individual (folio contiene slashes → path converter)
+    path('fus/<path:folio>/pdf/',     DescargarFUSPDFView.as_view(),   name='fus-descargar-pdf'),
 ]

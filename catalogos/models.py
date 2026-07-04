@@ -1,9 +1,34 @@
 from django.db import models
 
 
+class Estatus(models.Model):
+    class Meta:
+        db_table = 'scs_tbl_estatus'
+        ordering = ['orden']
+
+    TIPO_FLUJO_CHOICES = [
+        ('PARTICULAR', 'Particular (ROL1 – FUS)'),
+        ('TITULAR',    'Titular (ROL2 – Turnado)'),
+        ('AMBOS',      'Ambos flujos'),
+    ]
+
+    clave             = models.CharField(max_length=20, unique=True)
+    nombre            = models.CharField(max_length=60)
+    tipoFlujo         = models.CharField(max_length=12, choices=TIPO_FLUJO_CHOICES)
+    orden             = models.PositiveSmallIntegerField(default=0)
+    fechaRegistro     = models.DateTimeField(auto_now_add=True, null=True)
+    idUsuarioRegistra = models.IntegerField(null=True, blank=True)
+    fechaModificacion = models.DateTimeField(auto_now=True, null=True)
+    idUsuarioModifica = models.IntegerField(null=True, blank=True)
+    activa            = models.BooleanField(default=True)
+
+    def __str__(self):
+        return f"{self.nombre} ({self.tipoFlujo})"
+
+
 class MedioRecepcion(models.Model):
     class Meta:
-        db_table = 'scs_cat_medios_recepcion'
+        db_table = 'scs_cat_medios'
 
     nombreMedio = models.CharField(max_length=255, null=True, blank=True)
     paraTurnado = models.IntegerField(default=0)
@@ -19,7 +44,7 @@ class MedioRecepcion(models.Model):
 
 class PrioridadCriterio(models.Model):
     class Meta:
-        db_table = 'scs_cat_prioridad_criterios'
+        db_table = 'scs_cat_prioridad'
 
     NIVEL_CHOICES = [
         ('Alta', 'Alta'),

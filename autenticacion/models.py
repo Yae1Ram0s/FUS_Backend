@@ -10,7 +10,6 @@ class CorreoAutorizado(models.Model):
     ROL_CHOICES = [
         ('ROL1', 'Particular del Titular'),
         ('ROL2', 'Titular / Enlace Estratégico'),
-        ('ADM', 'Administrador'),
     ]
 
     email = models.EmailField(unique=True)

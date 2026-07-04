@@ -1,35 +1,212 @@
-import hashlib
+import secrets
+import string
 
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
+from django.core.mail import send_mail
 from django.utils import timezone
+from datetime import timedelta
 
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.throttling import AnonRateThrottle
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import CorreoAutorizado
+from .models import CorreoAutorizado, CodigoOTP
 from .serializers import LoginSerializer, UsuarioROL2Serializer
-from solicitudes.models import Bitacora
+from solicitudes.utils import get_rol, log_bitacora as _log
 
 
-def _log(usuario, rol, accion, ip=None, folio=None, estado_ant=None, estado_nuevo=None, obs=None):
-    Bitacora.objects.create(
-        fusFolio=folio,
-        usuario=usuario,
-        rol=rol,
-        accion=accion,
-        estadoAnterior=estado_ant,
-        estadoNuevo=estado_nuevo,
-        ipCliente=ip,
-        observaciones=obs,
+class LoginThrottle(AnonRateThrottle):
+    scope = 'login'
+
+
+class OTPThrottle(AnonRateThrottle):
+    scope = 'otp'
+
+
+def _generar_otp(email, ip):
+    codigo = ''.join(secrets.choice(string.digits) for _ in range(6))
+    CodigoOTP.objects.filter(email=email, usado=0).update(usado=1)
+    CodigoOTP.objects.create(
+        email=email,
+        codigo=codigo,
+        fechaExpiracion=timezone.now() + timedelta(minutes=15),
+        ipSolicitante=ip,
     )
+    return codigo
+
+
+class VerificarCorreoView(APIView):
+    """
+    POST { email }
+    Determina si el correo es nuevo (envía OTP) o existente (pide contraseña).
+    """
+    permission_classes  = [AllowAny]
+    throttle_classes    = [OTPThrottle]
+
+    def post(self, request):
+        email = request.data.get('email', '').strip().lower()
+        if not email:
+            return Response({'detail': 'Correo requerido.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            autorizado = CorreoAutorizado.objects.get(email=email, activo=1)
+        except CorreoAutorizado.DoesNotExist:
+            return Response(
+                {'detail': 'Correo no autorizado. Contacta al administrador.'},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        if User.objects.filter(email=email).exists():
+            return Response({'estado': 'existente'})
+
+        # Usuario nuevo — generar y enviar OTP
+        codigo = _generar_otp(email, request.META.get('REMOTE_ADDR'))
+        send_mail(
+            subject='Tu código de acceso — Sistema de Control de Solicitudes',
+            message=(
+                f'Hola {autorizado.nombre},\n\n'
+                f'Tu código de verificación es:\n\n'
+                f'    {codigo}\n\n'
+                f'Válido por 15 minutos. No lo compartas con nadie.\n\n'
+                f'Si no solicitaste este código, ignora este mensaje.'
+            ),
+            from_email=None,
+            recipient_list=[email],
+            fail_silently=False,
+        )
+        return Response({'estado': 'nuevo'})
+
+
+class VerificarOTPView(APIView):
+    """
+    POST { email, codigo }
+    """
+    permission_classes = [AllowAny]
+    throttle_classes   = [OTPThrottle]
+
+    def post(self, request):
+        email  = request.data.get('email', '').strip().lower()
+        codigo = request.data.get('codigo', '').strip()
+
+        try:
+            CodigoOTP.objects.get(
+                email=email,
+                codigo=codigo,
+                usado=0,
+                fechaExpiracion__gt=timezone.now(),
+            )
+        except CodigoOTP.DoesNotExist:
+            return Response(
+                {'detail': 'Código incorrecto o expirado. Intenta de nuevo.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response({'valido': True})
+
+
+class EstablecerContrasenaView(APIView):
+    """
+    POST { email, codigo, password }
+    Crea el usuario Django y devuelve tokens JWT.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        email    = request.data.get('email', '').strip().lower()
+        codigo   = request.data.get('codigo', '').strip()
+        password = request.data.get('password', '')
+
+        if len(password) < 8:
+            return Response(
+                {'detail': 'La contraseña debe tener al menos 8 caracteres.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            otp = CodigoOTP.objects.get(
+                email=email,
+                codigo=codigo,
+                usado=0,
+                fechaExpiracion__gt=timezone.now(),
+            )
+        except CodigoOTP.DoesNotExist:
+            return Response(
+                {'detail': 'Código inválido. Reinicia el proceso.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            autorizado = CorreoAutorizado.objects.get(email=email, activo=1)
+        except CorreoAutorizado.DoesNotExist:
+            return Response({'detail': 'Correo no autorizado.'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        user = User.objects.create_user(
+            username=email,
+            email=email,
+            password=password,
+            first_name=autorizado.nombre,
+        )
+
+        otp.usado = 1
+        otp.save()
+
+        refresh = RefreshToken.for_user(user)
+        _log(usuario=email, rol=autorizado.rol, accion='REGISTRO', ip=request.META.get('REMOTE_ADDR'))
+
+        return Response({
+            'access':  str(refresh.access_token),
+            'refresh': str(refresh),
+            'user': {
+                'id':     user.id,
+                'email':  email,
+                'nombre': autorizado.nombre,
+                'rol':    autorizado.rol,
+            },
+        })
+
+
+class ReenviarOTPView(APIView):
+    """
+    POST { email }
+    Reenvía un nuevo OTP si el correo es válido y el usuario aún no existe.
+    """
+    permission_classes = [AllowAny]
+    throttle_classes   = [OTPThrottle]
+
+    def post(self, request):
+        email = request.data.get('email', '').strip().lower()
+
+        try:
+            autorizado = CorreoAutorizado.objects.get(email=email, activo=1)
+        except CorreoAutorizado.DoesNotExist:
+            return Response({'detail': 'Correo no autorizado.'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        if User.objects.filter(email=email).exists():
+            return Response({'detail': 'Este usuario ya tiene cuenta activa.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        codigo = _generar_otp(email, request.META.get('REMOTE_ADDR'))
+        send_mail(
+            subject='Nuevo código de acceso — Sistema de Control de Solicitudes',
+            message=(
+                f'Hola {autorizado.nombre},\n\n'
+                f'Tu nuevo código de verificación es:\n\n'
+                f'    {codigo}\n\n'
+                f'Válido por 15 minutos.'
+            ),
+            from_email=None,
+            recipient_list=[email],
+            fail_silently=False,
+        )
+        return Response({'enviado': True})
 
 
 class LoginView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes   = [LoginThrottle]
 
     def post(self, request):
         ser = LoginSerializer(data=request.data)
@@ -40,13 +217,11 @@ class LoginView(APIView):
         password = ser.validated_data['password']
         ip       = request.META.get('REMOTE_ADDR')
 
-        # Verificar lista blanca
         try:
             autorizado = CorreoAutorizado.objects.get(email=email, activo=1)
         except CorreoAutorizado.DoesNotExist:
             return Response({'detail': 'Correo no autorizado.'}, status=status.HTTP_401_UNAUTHORIZED)
 
-        # Autenticar — Django usa username; buscamos el User por email
         try:
             django_user = User.objects.get(email=email)
         except User.DoesNotExist:
@@ -57,13 +232,7 @@ class LoginView(APIView):
             return Response({'detail': 'Contraseña incorrecta.'}, status=status.HTTP_401_UNAUTHORIZED)
 
         refresh = RefreshToken.for_user(user)
-
-        _log(
-            usuario=email,
-            rol=autorizado.rol,
-            accion='INICIO_SESION',
-            ip=ip,
-        )
+        _log(usuario=email, rol=autorizado.rol, accion='INICIO_SESION', ip=ip)
 
         return Response({
             'access':  str(refresh.access_token),
@@ -85,13 +254,104 @@ class LogoutView(APIView):
         ip         = request.META.get('REMOTE_ADDR')
         autorizado = CorreoAutorizado.objects.filter(email=email, activo=1).first()
         rol        = autorizado.rol if autorizado else ''
-
         _log(usuario=email, rol=rol, accion='CIERRE_SESION', ip=ip)
         return Response({'detail': 'Sesión cerrada.'})
 
 
+class RecuperarContrasenaView(APIView):
+    """
+    POST { email }
+    Envía OTP de recuperación a un usuario existente.
+    """
+    permission_classes = [AllowAny]
+    throttle_classes   = [OTPThrottle]
+
+    def post(self, request):
+        email = request.data.get('email', '').strip().lower()
+        if not email:
+            return Response({'detail': 'Correo requerido.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            autorizado = CorreoAutorizado.objects.get(email=email, activo=1)
+        except CorreoAutorizado.DoesNotExist:
+            # No revelar si el correo existe o no
+            return Response({'enviado': True})
+
+        if not User.objects.filter(email=email).exists():
+            return Response({'enviado': True})
+
+        codigo = _generar_otp(email, request.META.get('REMOTE_ADDR'))
+        send_mail(
+            subject='Recuperación de contraseña — Sistema de Control de Solicitudes',
+            message=(
+                f'Hola {autorizado.nombre},\n\n'
+                f'Recibimos una solicitud para restablecer tu contraseña.\n\n'
+                f'Tu código de verificación es:\n\n'
+                f'    {codigo}\n\n'
+                f'Válido por 15 minutos. Si no solicitaste esto, ignora este mensaje.'
+            ),
+            from_email=None,
+            recipient_list=[email],
+            fail_silently=False,
+        )
+        return Response({'enviado': True})
+
+
+class RestablecerContrasenaView(APIView):
+    """
+    POST { email, codigo, password }
+    Restablece la contraseña de un usuario existente verificando el OTP.
+    """
+    permission_classes = [AllowAny]
+    throttle_classes   = [OTPThrottle]
+
+    def post(self, request):
+        email    = request.data.get('email', '').strip().lower()
+        codigo   = request.data.get('codigo', '').strip()
+        password = request.data.get('password', '')
+
+        if len(password) < 8:
+            return Response(
+                {'detail': 'La contraseña debe tener al menos 8 caracteres.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            otp = CodigoOTP.objects.get(
+                email=email,
+                codigo=codigo,
+                usado=0,
+                fechaExpiracion__gt=timezone.now(),
+            )
+        except CodigoOTP.DoesNotExist:
+            return Response(
+                {'detail': 'Código incorrecto o expirado.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            return Response({'detail': 'Usuario no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+
+        user.set_password(password)
+        user.save()
+
+        otp.usado = 1
+        otp.save()
+
+        autorizado = CorreoAutorizado.objects.filter(email=email, activo=1).first()
+        _log(
+            usuario=email,
+            rol=autorizado.rol if autorizado else '',
+            accion='RESTABLECER_CONTRASENA',
+            ip=request.META.get('REMOTE_ADDR'),
+        )
+
+        return Response({'restablecida': True})
+
+
 class UsuariosROL2View(APIView):
-    """Devuelve la lista de usuarios con ROL2 para el modal de turnar."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -99,3 +359,97 @@ class UsuariosROL2View(APIView):
         usuarios    = User.objects.filter(email__in=emails_rol2, is_active=True)
         ser         = UsuarioROL2Serializer(usuarios, many=True)
         return Response(ser.data)
+
+
+# ── Panel Admin (ROL1) ────────────────────────────────────────────────────────
+
+def _es_adm(user):
+    return get_rol(user) == 'ROL1'
+
+
+class CorreoAutorizadoListView(APIView):
+    """GET / POST — lista y crea correos autorizados (solo ADM)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if not _es_adm(request.user):
+            return Response({'detail': 'No autorizado.'}, status=403)
+
+        qs = CorreoAutorizado.objects.all().order_by('rol', 'email')
+        busqueda = request.query_params.get('search')
+        rol      = request.query_params.get('rol')
+        if busqueda: qs = qs.filter(email__icontains=busqueda) | qs.filter(nombre__icontains=busqueda)
+        if rol:      qs = qs.filter(rol=rol)
+
+        data = [{
+            'id':     c.id,
+            'email':  c.email,
+            'nombre': c.nombre,
+            'rol':    c.rol,
+            'activo': c.activo,
+            'tiene_cuenta': User.objects.filter(email=c.email).exists(),
+        } for c in qs]
+        return Response(data)
+
+    def post(self, request):
+        if not _es_adm(request.user):
+            return Response({'detail': 'No autorizado.'}, status=403)
+
+        email  = request.data.get('email', '').strip().lower()
+        nombre = request.data.get('nombre', '').strip()
+        rol    = request.data.get('rol', 'ROL1')
+
+        if not email or not nombre:
+            return Response({'detail': 'Email y nombre son requeridos.'}, status=400)
+        if rol not in ('ROL1', 'ROL2'):
+            return Response({'detail': 'Rol inválido.'}, status=400)
+        if CorreoAutorizado.objects.filter(email=email).exists():
+            return Response({'detail': 'Este correo ya está registrado.'}, status=400)
+
+        c = CorreoAutorizado.objects.create(
+            email=email, nombre=nombre, rol=rol,
+            idUsuarioRegistra=request.user.id,
+        )
+        return Response({'id': c.id, 'email': c.email, 'nombre': c.nombre, 'rol': c.rol, 'activo': c.activo},
+                        status=201)
+
+
+class CorreoAutorizadoDetailView(APIView):
+    """PATCH — editar nombre, correo, rol, activo."""
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk):
+        if not _es_adm(request.user):
+            return Response({'detail': 'No autorizado.'}, status=403)
+
+        try:
+            c = CorreoAutorizado.objects.get(pk=pk)
+        except CorreoAutorizado.DoesNotExist:
+            return Response({'detail': 'No encontrado.'}, status=404)
+
+        if 'activo' in request.data:
+            c.activo = int(request.data['activo'])
+        if 'rol' in request.data and request.data['rol'] in ('ROL1', 'ROL2'):
+            c.rol = request.data['rol']
+        if 'nombre' in request.data:
+            c.nombre = request.data['nombre'].strip()
+
+        if 'email' in request.data:
+            nuevo_email = request.data['email'].strip().lower()
+            if nuevo_email != c.email:
+                if CorreoAutorizado.objects.filter(email=nuevo_email).exclude(pk=pk).exists():
+                    return Response({'detail': 'Ese correo ya está registrado.'}, status=400)
+                # Actualizar Django User si ya tiene cuenta
+                try:
+                    django_user = User.objects.get(email=c.email)
+                    django_user.email    = nuevo_email
+                    django_user.username = nuevo_email
+                    django_user.save()
+                except User.DoesNotExist:
+                    pass
+                c.email = nuevo_email
+
+        c.idUsuarioModifica = request.user.id
+        c.save()
+
+        return Response({'id': c.id, 'email': c.email, 'nombre': c.nombre, 'rol': c.rol, 'activo': c.activo})

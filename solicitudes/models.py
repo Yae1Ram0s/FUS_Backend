@@ -2,7 +2,7 @@ import uuid
 
 from django.db import models
 from django.contrib.auth.models import User
-from catalogos.models import MedioRecepcion
+from catalogos.models import MedioRecepcion, Estatus
 
 
 PRIORIDAD_CHOICES = [
@@ -15,13 +15,12 @@ PRIORIDAD_CHOICES = [
 class FUS(models.Model):
     class Meta:
         db_table = 'scs_tbl_fus'
-
-    ESTATUS_CHOICES = [
-        ('Registrado', 'Registrado'),
-        ('Turnado', 'Turnado'),
-        ('Atendido', 'Atendido'),
-        ('Concluido', 'Concluido'),
-    ]
+        indexes = [
+            # idx_fus_estatus: auto-created by FK constraint
+            models.Index(fields=['folio'],             name='idx_fus_folio'),
+            models.Index(fields=['fechaRegistro'],     name='idx_fus_fecha'),
+            models.Index(fields=['idSolicitanteInterno'], name='idx_fus_solicitante'),
+        ]
 
     folio = models.CharField(max_length=50, unique=True)
     idSolicitanteInterno = models.ForeignKey(
@@ -36,7 +35,17 @@ class FUS(models.Model):
     medioEspecificacion = models.CharField(max_length=255, null=True, blank=True)
     prioridad = models.CharField(max_length=10, choices=PRIORIDAD_CHOICES, null=True, blank=True)
     prioridadModificada = models.IntegerField(default=0)
-    estatusParticular = models.CharField(max_length=20, choices=ESTATUS_CHOICES, default='Registrado')
+    nombreExterno   = models.CharField(max_length=255, null=True, blank=True)
+    telefonoExterno = models.CharField(max_length=20,  null=True, blank=True)
+    correoExterno   = models.CharField(max_length=255, null=True, blank=True)
+    estatusParticular = models.ForeignKey(
+        Estatus,
+        on_delete=models.PROTECT,
+        to_field='clave',
+        db_column='estatusParticular',
+        related_name='fus_set',
+        default='Registrado',
+    )
     fechaConclusion = models.DateTimeField(null=True, blank=True)
     fechaRegistro = models.DateTimeField(auto_now_add=True, null=True)
     fechaModificacion = models.DateTimeField(auto_now=True, null=True)
@@ -47,23 +56,6 @@ class FUS(models.Model):
     def __str__(self):
         return self.folio
 
-
-class SolicitanteExterno(models.Model):
-    class Meta:
-        db_table = 'scs_tbl_solicitantes_externos'
-
-    idFus = models.OneToOneField(FUS, on_delete=models.CASCADE, related_name='solicitante_externo')
-    nombre = models.CharField(max_length=255, null=True, blank=True)
-    telefono = models.CharField(max_length=20, null=True, blank=True)
-    correo = models.CharField(max_length=255, null=True, blank=True)
-    fechaRegistro = models.DateTimeField(auto_now_add=True, null=True)
-    fechaModificacion = models.DateTimeField(auto_now=True, null=True)
-    idUsuarioRegistra = models.IntegerField(null=True, blank=True)
-    idUsuarioModifica = models.IntegerField(null=True, blank=True)
-    activo = models.IntegerField(default=1)
-
-    def __str__(self):
-        return self.nombre or str(self.idFus)
 
 
 class Evidencia(models.Model):
@@ -91,12 +83,10 @@ class Evidencia(models.Model):
 class Turnado(models.Model):
     class Meta:
         db_table = 'scs_tbl_turnados'
-
-    ESTATUS_CHOICES = [
-        ('Recibido', 'Recibido'),
-        ('En_seguimiento', 'En seguimiento'),
-        ('Concluido', 'Concluido'),
-    ]
+        indexes = [
+            models.Index(fields=['idDestinatario'], name='idx_turnado_dest'),
+            # idx_turnado_estatus: auto-created by FK constraint
+        ]
 
     idFus = models.ForeignKey(FUS, on_delete=models.CASCADE, related_name='turnados')
     idRemitente = models.ForeignKey(
@@ -108,7 +98,14 @@ class Turnado(models.Model):
     idMedio = models.ForeignKey(MedioRecepcion, on_delete=models.PROTECT, null=True)
     solicitudTexto = models.TextField(null=True, blank=True)
     fechaHoraTurnado = models.DateTimeField(null=True, blank=True)
-    estatusTitular = models.CharField(max_length=20, choices=ESTATUS_CHOICES, default='Recibido')
+    estatusTitular = models.ForeignKey(
+        Estatus,
+        on_delete=models.PROTECT,
+        to_field='clave',
+        db_column='estatusTitular',
+        related_name='turnados_set',
+        default='Recibido',
+    )
     fechaRegistro = models.DateTimeField(auto_now_add=True, null=True)
     fechaModificacion = models.DateTimeField(auto_now=True, null=True)
     idUsuarioRegistra = models.IntegerField(null=True, blank=True)
@@ -123,7 +120,7 @@ class Seguimiento(models.Model):
     """Respuestas y actividades de seguimiento registradas por ROL2 (CU-06, RN-03)."""
 
     class Meta:
-        db_table = 'scs_tbl_seguimientos'
+        db_table = 'scs_tbl_respuestas'
 
     idTurnado = models.ForeignKey(Turnado, on_delete=models.CASCADE, related_name='seguimientos')
     fechaActividad = models.DateField(null=True, blank=True)
@@ -139,31 +136,16 @@ class Seguimiento(models.Model):
         return f"Seguimiento {self.pk} – {self.idTurnado}"
 
 
-class Accion(models.Model):
-    """Acciones por emprender registradas por ROL2 (CU-07)."""
-
-    class Meta:
-        db_table = 'scs_tbl_acciones'
-
-    idTurnado = models.ForeignKey(Turnado, on_delete=models.CASCADE, related_name='acciones')
-    numeroOrden = models.IntegerField(null=True, blank=True)
-    descripcion = models.TextField()
-    completada = models.IntegerField(default=0)
-    fechaRegistro = models.DateTimeField(auto_now_add=True, null=True)
-    fechaModificacion = models.DateTimeField(auto_now=True, null=True)
-    idUsuarioRegistra = models.IntegerField(null=True, blank=True)
-    idUsuarioModifica = models.IntegerField(null=True, blank=True)
-    activo = models.IntegerField(default=1)
-
-    def __str__(self):
-        return f"Acción {self.numeroOrden} – {self.idTurnado}"
-
-
 class Bitacora(models.Model):
     """Registro inmutable de auditoría. Solo lectura para todos los roles (RN-07, sección 6)."""
 
     class Meta:
         db_table = 'scs_tbl_bitacora'
+        indexes = [
+            models.Index(fields=['usuario'],   name='idx_bitacora_usuario'),
+            models.Index(fields=['fusFolio'],  name='idx_bitacora_folio'),
+            models.Index(fields=['fechaHora'], name='idx_bitacora_fecha'),
+        ]
 
     ACCION_CHOICES = [
         ('REGISTRO_FUS', 'Registro FUS'),
@@ -175,6 +157,7 @@ class Bitacora(models.Model):
         ('REAPERTURA_FUS', 'Reapertura FUS'),
         ('INICIO_SESION', 'Inicio de sesión'),
         ('CIERRE_SESION', 'Cierre de sesión'),
+        ('RESTABLECER_CONTRASENA', 'Restablecimiento de contraseña'),
         ('ELIMINACION', 'Eliminación lógica'),
     ]
 

@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import FUS, SolicitanteExterno, Evidencia, Turnado, Seguimiento, Accion, Bitacora, Notificacion
+from .models import FUS, Evidencia, Turnado, Seguimiento, Bitacora, Notificacion
 
 
 @admin.register(FUS)
@@ -8,11 +8,6 @@ class FUSAdmin(admin.ModelAdmin):
     list_filter = ['activo', 'estatusParticular', 'prioridad']
     search_fields = ['folio']
 
-
-@admin.register(SolicitanteExterno)
-class SolicitanteExternoAdmin(admin.ModelAdmin):
-    list_display = ['id', 'idFus', 'nombre', 'telefono', 'correo', 'activo']
-    list_filter = ['activo']
 
 
 @admin.register(Evidencia)
@@ -32,11 +27,6 @@ class SeguimientoAdmin(admin.ModelAdmin):
     list_display = ['id', 'idTurnado', 'fechaActividad', 'activo']
     list_filter = ['activo']
 
-
-@admin.register(Accion)
-class AccionAdmin(admin.ModelAdmin):
-    list_display = ['id', 'idTurnado', 'numeroOrden', 'completada', 'activo']
-    list_filter = ['activo', 'completada']
 
 
 @admin.register(Bitacora)
