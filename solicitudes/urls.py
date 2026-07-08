@@ -1,6 +1,7 @@
 from django.urls import path
 from .views import (
     FUSListCreateView,
+    FUSDetailView,
     TurnarFUSView,
     FUSActividadView,
     ConcluirTurnadoView,
@@ -21,6 +22,7 @@ from .views import (
 urlpatterns = [
     # FUS
     path('fus/',                               FUSListCreateView.as_view(),      name='fus-list-create'),
+    path('fus/<int:pk>/',                      FUSDetailView.as_view(),          name='fus-detail'),
     path('fus/<int:pk>/turnar/',               TurnarFUSView.as_view(),          name='fus-turnar'),
     path('fus/<int:pk>/actividad/',            FUSActividadView.as_view(),       name='fus-actividad'),
 

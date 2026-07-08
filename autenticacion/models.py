@@ -15,6 +15,11 @@ class CorreoAutorizado(models.Model):
     email = models.EmailField(unique=True)
     nombre = models.CharField(max_length=255)
     rol = models.CharField(max_length=10, choices=ROL_CHOICES)
+    unidadAdministrativa = models.ForeignKey(
+        'catalogos.UnidadAdministrativa', null=True, blank=True,
+        on_delete=models.SET_NULL, db_constraint=False,
+        related_name='correos_autorizados',
+    )
     fechaRegistro = models.DateTimeField(auto_now_add=True, null=True)
     fechaModificacion = models.DateTimeField(auto_now=True, null=True)
     idUsuarioRegistra = models.IntegerField(null=True, blank=True)

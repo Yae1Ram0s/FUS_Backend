@@ -1,4 +1,6 @@
+import datetime
 import hashlib
+import json
 import os
 
 ALLOWED_MIME_TYPES = {
@@ -39,7 +41,7 @@ from autenticacion.models import CorreoAutorizado
 from catalogos.models import MedioRecepcion
 from .models import FUS, Evidencia, Turnado, Seguimiento, Bitacora, Notificacion
 from .serializers import FUSSerializer, TurnadoSerializer, TurnadoActividadSerializer, SeguimientoSerializer, NotificacionSerializer
-from .utils import get_rol, log_bitacora
+from .utils import get_rol, log_bitacora, resolver_nombre
 
 
 def _push_notificacion(notif):
@@ -85,6 +87,50 @@ def _sha256(f):
     for chunk in f.chunks():
         h.update(chunk)
     return h.hexdigest()
+
+
+def _guardar_evidencias(fus, request, user):
+    """Valida y guarda los archivos de 'evidencias' del request para un FUS.
+    Devuelve una Response de error si algo falla, o None si todo salió bien."""
+    from django.conf import settings
+
+    archivos = request.FILES.getlist('evidencias')
+    if not archivos:
+        return None
+
+    total_size = sum(a.size for a in archivos)
+    if total_size > MAX_TOTAL_SIZE:
+        return Response({'detail': 'El total de archivos supera 30 MB.'}, status=status.HTTP_400_BAD_REQUEST)
+    for archivo in archivos:
+        err = _validar_archivo(archivo)
+        if err:
+            return Response({'detail': err}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        comentarios_lista = json.loads(request.data.get('comentariosEvidencias') or '[]')
+    except (ValueError, TypeError):
+        comentarios_lista = []
+
+    for i, archivo in enumerate(archivos):
+        sha = _sha256(archivo)
+        nombre_seguro = os.path.basename(archivo.name)
+        ruta_rel = f"evidencias/{fus.pk}/{nombre_seguro}"
+        ruta_abs = os.path.join(settings.MEDIA_ROOT, ruta_rel)
+        os.makedirs(os.path.dirname(ruta_abs), exist_ok=True)
+        with open(ruta_abs, 'wb') as dest:
+            for chunk in archivo.chunks():
+                dest.write(chunk)
+        comentario = comentarios_lista[i].strip() if i < len(comentarios_lista) and comentarios_lista[i] else None
+        Evidencia.objects.create(
+            idFus=fus,
+            nombreArchivo=nombre_seguro,
+            rutaArchivo=ruta_rel,
+            tipoMime=archivo.content_type,
+            hashSha256=sha,
+            comentarios=comentario,
+            idUsuarioRegistra=user.id,
+        )
+    return None
 
 
 # ── FUS ─────────────────────────────────────────────────────────────────────
@@ -150,6 +196,7 @@ class FUSListCreateView(APIView):
             idMedioRecepcion=medio,
             medioEspecificacion=data.get('medioEspecificacion', ''),
             prioridad=data.get('prioridad') or None,
+            criterios=data.get('criterios') or None,
             nombreExterno=nombre_ext,
             telefonoExterno=tel_ext,
             correoExterno=correo_ext,
@@ -157,44 +204,67 @@ class FUSListCreateView(APIView):
             idUsuarioRegistra=user.id,
         )
 
-        # Evidencias — validar antes de guardar
-        from django.conf import settings
-        archivos = request.FILES.getlist('evidencias')
-        total_size = sum(a.size for a in archivos)
-        if total_size > MAX_TOTAL_SIZE:
+        err_resp = _guardar_evidencias(fus, request, user)
+        if err_resp:
             fus.delete()
-            return Response(
-                {'detail': 'El total de archivos supera 30 MB.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        for archivo in archivos:
-            err = _validar_archivo(archivo)
-            if err:
-                fus.delete()
-                return Response({'detail': err}, status=status.HTTP_400_BAD_REQUEST)
-
-        for archivo in archivos:
-            sha = _sha256(archivo)
-            nombre_seguro = os.path.basename(archivo.name)
-            ruta_rel = f"evidencias/{fus.pk}/{nombre_seguro}"
-            ruta_abs = os.path.join(settings.MEDIA_ROOT, ruta_rel)
-            os.makedirs(os.path.dirname(ruta_abs), exist_ok=True)
-            with open(ruta_abs, 'wb') as dest:
-                for chunk in archivo.chunks():
-                    dest.write(chunk)
-            Evidencia.objects.create(
-                idFus=fus,
-                nombreArchivo=nombre_seguro,
-                rutaArchivo=ruta_rel,
-                tipoMime=archivo.content_type,
-                hashSha256=sha,
-                idUsuarioRegistra=user.id,
-            )
+            return err_resp
 
         _log(usuario=user.email, rol=rol, accion='REGISTRO_FUS',
              ip=ip, folio=folio, estado_nuevo='Registrado')
 
         return Response(FUSSerializer(fus).data, status=status.HTTP_201_CREATED)
+
+
+class FUSDetailView(APIView):
+    """GET / PATCH — ver o editar un FUS individual (ROL1). Solo editable en estatus 'Registrado'."""
+    permission_classes = [IsAuthenticated]
+    parser_classes     = [MultiPartParser, FormParser, JSONParser]
+
+    def get(self, request, pk):
+        if _rol(request.user) != 'ROL1':
+            return Response({'detail': 'No autorizado.'}, status=403)
+        fus = get_object_or_404(
+            FUS.objects.select_related('idSolicitanteInterno', 'idMedioRecepcion').prefetch_related('evidencias'),
+            pk=pk, activo=1,
+        )
+        return Response(FUSSerializer(fus).data)
+
+    def patch(self, request, pk):
+        user = request.user
+        rol  = _rol(user)
+        if rol != 'ROL1':
+            return Response({'detail': 'No autorizado.'}, status=403)
+
+        fus = get_object_or_404(FUS, pk=pk, activo=1)
+        if fus.estatusParticular_id != 'Registrado':
+            return Response(
+                {'detail': 'Solo se puede editar una solicitud en estatus "Registrado".'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        data = request.data
+        if 'idMedioRecepcion' in data:
+            medio_id = data.get('idMedioRecepcion')
+            fus.idMedioRecepcion = get_object_or_404(MedioRecepcion, pk=medio_id) if medio_id else None
+        if 'descripcion' in data:         fus.descripcion = data.get('descripcion', '')
+        if 'contexto' in data:            fus.contexto = data.get('contexto', '')
+        if 'medioEspecificacion' in data:  fus.medioEspecificacion = data.get('medioEspecificacion', '')
+        if 'prioridad' in data:           fus.prioridad = data.get('prioridad') or None
+        if 'criterios' in data:           fus.criterios = data.get('criterios') or None
+        if 'nombreExterno' in data:       fus.nombreExterno = data.get('nombreExterno', '').strip() or None
+        if 'telefonoExterno' in data:     fus.telefonoExterno = data.get('telefonoExterno', '').strip() or None
+        if 'correoExterno' in data:       fus.correoExterno = data.get('correoExterno', '').strip() or None
+        fus.idUsuarioModifica = user.id
+        fus.save()
+
+        err_resp = _guardar_evidencias(fus, request, user)
+        if err_resp:
+            return err_resp
+
+        _log(usuario=user.email, rol=rol, accion='REGISTRO_FUS',
+             ip=request.META.get('REMOTE_ADDR'), folio=fus.folio, obs='Edición de solicitud')
+
+        return Response(FUSSerializer(fus).data)
 
 
 class TurnarFUSView(APIView):
@@ -525,30 +595,93 @@ ROL1_ACCIONES = ['REGISTRO_RESPUESTA', 'CONCLUSION_FUS', 'ASIGNACION_ESTADO']
 ROL2_ACCIONES = ['CONCLUSION_FUS', 'REGISTRO_RESPUESTA', 'REGISTRO_ACCION']
 
 
+BITACORA_COLS_VALIDAS  = ['folio', 'nombre', 'usuario', 'fecha', 'accion', 'estado_ant', 'estado_nuevo', 'observaciones']
+BITACORA_COLS_DEFAULT  = ['folio', 'nombre', 'usuario', 'fecha', 'accion']
+
+
+def _parse_columnas_bitacora(request):
+    raw = request.query_params.get('columnas')
+    if not raw:
+        return BITACORA_COLS_DEFAULT
+    cols = [c.strip() for c in raw.split(',') if c.strip() in BITACORA_COLS_VALIDAS]
+    return cols or BITACORA_COLS_DEFAULT
+
+
+BITACORA_TITULO_PRINCIPAL = 'Sistema de control de solicitudes'
+ANAM_LOGO_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    'frontend', 'src', 'assets', 'Logos_P_Hacienda_ANAM.png',
+)
+
+
+def _resolver_unidad_administrativa(user):
+    autorizado = CorreoAutorizado.objects.select_related('unidadAdministrativa').filter(email=user.email).first()
+    if autorizado and autorizado.unidadAdministrativa_id:
+        return autorizado.unidadAdministrativa.unidadAdministrativa
+    return 'Sin unidad asignada'
+
+
+def _metadata_generacion():
+    ahora = timezone.localtime(timezone.now())
+    return f'Ciudad de México, {ahora.strftime("%d/%m/%Y")} a las {ahora.strftime("%H:%M")} h'
+
+
 def _bitacora_base_qs(request):
-    """Devuelve el queryset de bitácora ya filtrado por rol del usuario."""
+    """Devuelve el queryset de bitácora ya filtrado por rol del usuario.
+    Solo se incluyen registros ligados a un FUS (se excluyen eventos de cuenta
+    como inicio/cierre de sesión o restablecimiento de contraseña)."""
     rol = _rol(request.user)
     if rol == 'ROL1':
-        return Bitacora.objects.all()
+        qs = Bitacora.objects.all()
     elif rol == 'ROL2':
-        return Bitacora.objects.filter(
+        qs = Bitacora.objects.filter(
             usuario=request.user.email, accion__in=ROL2_ACCIONES
         )
-    return Bitacora.objects.none()
+    else:
+        return Bitacora.objects.none()
+    return qs.exclude(fusFolio__isnull=True).exclude(fusFolio='')
+
+
+def _parse_fecha_local(fecha_str, fin_de_dia=False):
+    """Convierte 'YYYY-MM-DD' (hora local del servidor) a datetime aware en UTC.
+    Se evita el lookup `__date` de Django porque requiere CONVERT_TZ en MySQL,
+    lo cual falla silenciosamente (devuelve NULL) si el servidor no tiene
+    cargadas las tablas de zonas horarias, vaciando cualquier filtro de fecha."""
+    try:
+        y, m, d = (int(p) for p in fecha_str.split('-'))
+    except (ValueError, AttributeError):
+        return None
+    naive = datetime.datetime(y, m, d, 23, 59, 59, 999999) if fin_de_dia else datetime.datetime(y, m, d, 0, 0, 0)
+    return timezone.make_aware(naive, timezone.get_current_timezone())
 
 
 def _aplicar_filtros_bitacora(qs, params, rol):
     usuario     = params.get('usuario')
     accion      = params.get('accion')
     folio       = params.get('folio')
+    nombre      = params.get('nombre')
+    estatus_fus = params.get('estatus_fus')
     fecha_desde = params.get('fecha_desde')
     fecha_hasta = params.get('fecha_hasta')
 
     if usuario and rol == 'ROL1': qs = qs.filter(usuario__icontains=usuario)
     if accion:      qs = qs.filter(accion=accion)
     if folio:       qs = qs.filter(fusFolio__icontains=folio)
-    if fecha_desde: qs = qs.filter(fechaHora__date__gte=fecha_desde)
-    if fecha_hasta: qs = qs.filter(fechaHora__date__lte=fecha_hasta)
+
+    if nombre and rol == 'ROL1':
+        emails = CorreoAutorizado.objects.filter(nombre__icontains=nombre).values_list('email', flat=True)
+        qs = qs.filter(usuario__in=list(emails))
+
+    if estatus_fus:
+        folios = FUS.objects.filter(estatusParticular_id=estatus_fus).values_list('folio', flat=True)
+        qs = qs.filter(fusFolio__in=list(folios))
+
+    dt_desde = _parse_fecha_local(fecha_desde) if fecha_desde else None
+    if dt_desde: qs = qs.filter(fechaHora__gte=dt_desde)
+
+    dt_hasta = _parse_fecha_local(fecha_hasta, fin_de_dia=True) if fecha_hasta else None
+    if dt_hasta: qs = qs.filter(fechaHora__lte=dt_hasta)
+
     return qs
 
 
@@ -591,11 +724,14 @@ class ExportarBitacoraExcelView(APIView):
     def get(self, request):
         import openpyxl
         from django.http import HttpResponse
-        from openpyxl.styles import Font, PatternFill, Alignment
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+        from openpyxl.drawing.image import Image as XLImage
 
         rol = _rol(request.user)
         qs  = _bitacora_base_qs(request).order_by('-fechaHora')
         qs  = _aplicar_filtros_bitacora(qs, request.query_params, rol)
+        columnas = _parse_columnas_bitacora(request)
 
         ACCION_LABELS = {
             'REGISTRO_FUS': 'Registro FUS', 'TURNAR_FUS': 'Turnar FUS',
@@ -605,36 +741,100 @@ class ExportarBitacoraExcelView(APIView):
             'RESTABLECER_CONTRASENA': 'Restablecer contraseña',
             'ELIMINACION': 'Eliminación',
         }
+        nombres_map = dict(
+            CorreoAutorizado.objects.filter(
+                email__in=qs.values_list('usuario', flat=True).distinct()
+            ).values_list('email', 'nombre')
+        )
+        col_defs = {
+            'folio':         ('Folio',           lambda r: r.fusFolio or ''),
+            'nombre':        ('Nombre',          lambda r: nombres_map.get(r.usuario, '')),
+            'usuario':       ('Usuario',         lambda r: r.usuario),
+            'fecha':         ('Fecha y hora',    lambda r: r.fechaHora.strftime('%d/%m/%Y %H:%M:%S') if r.fechaHora else ''),
+            'accion':        ('Acción',          lambda r: ACCION_LABELS.get(r.accion, r.accion)),
+            'estado_ant':    ('Estado anterior', lambda r: r.estadoAnterior or ''),
+            'estado_nuevo':  ('Estado nuevo',    lambda r: r.estadoNuevo or ''),
+            'observaciones': ('Observaciones',   lambda r: r.observaciones or ''),
+        }
+        headers = [col_defs[c][0] for c in columnas]
+        n_cols  = len(headers)
 
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = 'Bitácora'
 
-        headers = ['Fecha y hora', 'Usuario', 'Rol', 'Acción', 'Folio',
-                   'Estado anterior', 'Estado nuevo', 'IP', 'Observaciones']
+        unidad_admin    = _resolver_unidad_administrativa(request.user)
+        metadata_linea  = _metadata_generacion()
+
+        # Encabezado institucional
+        ws.append(['AGENCIA NACIONAL DE ADUANAS DE MÉXICO'])
+        fila = ws.max_row
+        ws.merge_cells(start_row=fila, start_column=1, end_row=fila, end_column=n_cols)
+        cell = ws.cell(row=fila, column=1)
+        cell.font = Font(bold=True, size=11)
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+
+        # Título principal
+        ws.append([BITACORA_TITULO_PRINCIPAL.upper()])
+        fila = ws.max_row
+        ws.merge_cells(start_row=fila, start_column=1, end_row=fila, end_column=n_cols)
+        cell = ws.cell(row=fila, column=1)
+        cell.font = Font(bold=True, size=11)
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+
+        # Subtítulo dinámico — unidad/aduana asignada al usuario
+        ws.append([unidad_admin.upper()])
+        fila = ws.max_row
+        ws.merge_cells(start_row=fila, start_column=1, end_row=fila, end_column=n_cols)
+        cell = ws.cell(row=fila, column=1)
+        cell.font = Font(bold=True, size=11, color='1F5647')
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+
+        ws.append([])
+
+        # Metadatos — fecha/hora de generación (derecha)
+        ws.append([metadata_linea])
+        fila = ws.max_row
+        ws.merge_cells(start_row=fila, start_column=1, end_row=fila, end_column=n_cols)
+        cell = ws.cell(row=fila, column=1)
+        cell.font = Font(italic=True, size=9, color='595959')
+        cell.alignment = Alignment(horizontal='right')
+
+        # Logo institucional (izquierda)
+        logo_row = ws.max_row + 1
+        for _ in range(5):
+            ws.append([])
+        if os.path.exists(ANAM_LOGO_PATH):
+            img = XLImage(ANAM_LOGO_PATH)
+            img.width, img.height = 460, 460 * (150/889)
+            ws.add_image(img, f'A{logo_row}')
+
+        ws.append([])
+
         ws.append(headers)
-
-        fill = PatternFill('solid', fgColor='9F2241')
-        font = Font(bold=True, color='FFFFFF', size=11)
-        for cell in ws[1]:
+        header_row = ws.max_row
+        fill   = PatternFill('solid', fgColor='FFFF00')
+        thin   = Side(style='thin', color='000000')
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        for cell in ws[header_row]:
             cell.fill = fill
-            cell.font = font
+            cell.font = Font(bold=True, color='000000', size=11)
             cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+            cell.border = border
 
-        fmt = lambda d: d.strftime('%d/%m/%Y %H:%M:%S') if d else ''
         for r in qs:
-            ws.append([
-                fmt(r.fechaHora), r.usuario, r.rol,
-                ACCION_LABELS.get(r.accion, r.accion),
-                r.fusFolio or '', r.estadoAnterior or '', r.estadoNuevo or '',
-                r.ipCliente or '', r.observaciones or '',
-            ])
+            ws.append([col_defs[c][1](r) for c in columnas])
+            for cell in ws[ws.max_row]:
+                cell.border = border
 
-        for col in ws.columns:
-            ws.column_dimensions[col[0].column_letter].width = min(
-                max(len(str(cell.value or '')) for cell in col) + 4, 50
+        for i in range(1, n_cols + 1):
+            col_letter = get_column_letter(i)
+            max_len = max(
+                (len(str(ws.cell(row=r, column=i).value or '')) for r in range(header_row, ws.max_row + 1)),
+                default=10,
             )
-        ws.freeze_panes = 'A2'
+            ws.column_dimensions[col_letter].width = min(max_len + 4, 50)
+        ws.freeze_panes = f'A{header_row + 1}'
 
         resp = HttpResponse(
             content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
@@ -650,7 +850,7 @@ class ExportarBitacoraPDFView(APIView):
     def get(self, request):
         from django.http import HttpResponse
         from reportlab.lib.pagesizes import A4, landscape
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.lib import colors
         from reportlab.lib.units import cm
@@ -659,6 +859,7 @@ class ExportarBitacoraPDFView(APIView):
         rol = _rol(request.user)
         qs  = _bitacora_base_qs(request).order_by('-fechaHora')
         qs  = _aplicar_filtros_bitacora(qs, request.query_params, rol)
+        columnas = _parse_columnas_bitacora(request)
 
         ACCION_LABELS = {
             'REGISTRO_FUS': 'Registro FUS', 'TURNAR_FUS': 'Turnar FUS',
@@ -668,47 +869,89 @@ class ExportarBitacoraPDFView(APIView):
             'RESTABLECER_CONTRASENA': 'Restablecer contraseña',
             'ELIMINACION': 'Eliminación',
         }
+        nombres_map = dict(
+            CorreoAutorizado.objects.filter(
+                email__in=qs.values_list('usuario', flat=True).distinct()
+            ).values_list('email', 'nombre')
+        )
+
+        styles = getSampleStyleSheet()
+        cell_style  = ParagraphStyle('cell', parent=styles['Normal'], fontSize=7.5, leading=10)
+
+        col_defs = {
+            'folio':         ('Folio',         lambda r: r.fusFolio or '—'),
+            'nombre':        ('Nombre',        lambda r: nombres_map.get(r.usuario, '—')),
+            'usuario':       ('Usuario',       lambda r: r.usuario),
+            'fecha':         ('Fecha y hora',  lambda r: r.fechaHora.strftime('%d/%m/%Y %H:%M') if r.fechaHora else '—'),
+            'accion':        ('Acción',        lambda r: ACCION_LABELS.get(r.accion, r.accion)),
+            'estado_ant':    ('Estado ant.',   lambda r: r.estadoAnterior or '—'),
+            'estado_nuevo':  ('Estado nuevo',  lambda r: r.estadoNuevo or '—'),
+            'observaciones': ('Observaciones', lambda r: r.observaciones or '—'),
+        }
+        headers = [col_defs[c][0] for c in columnas]
+
+        unidad_admin   = _resolver_unidad_administrativa(request.user)
+        metadata_linea = _metadata_generacion()
 
         buf = io.BytesIO()
         doc = SimpleDocTemplate(buf, pagesize=landscape(A4),
                                 leftMargin=1.2*cm, rightMargin=1.2*cm,
-                                topMargin=1.2*cm, bottomMargin=1.2*cm)
+                                topMargin=4.4*cm, bottomMargin=1.2*cm)
 
-        styles = getSampleStyleSheet()
-        title_style = ParagraphStyle('title', parent=styles['Heading1'],
-                                     fontSize=15, textColor=colors.HexColor('#9F2241'), spaceAfter=6)
-        cell_style  = ParagraphStyle('cell', parent=styles['Normal'], fontSize=7.5, leading=10)
+        ancho_total = landscape(A4)[0] - 2.4*cm
 
-        elements = [Paragraph('Bitácora de auditoría — ANAM', title_style), Spacer(1, 0.3*cm)]
+        def _encabezado_bitacora(canvas_, doc_):
+            canvas_.saveState()
+            page_w, page_h = landscape(A4)
+            centro = page_w / 2
+            derecha = page_w - 1.2*cm
+            y = page_h - 1.1*cm
 
-        fmt = lambda d: d.strftime('%d/%m/%Y %H:%M') if d else '—'
-        data = [['Fecha y hora', 'Usuario', 'Rol', 'Acción', 'Folio', 'Est. ant.', 'Est. nuevo']]
+            canvas_.setFont('Helvetica-Bold', 11)
+            canvas_.setFillColor(colors.black)
+            canvas_.drawCentredString(centro, y, 'AGENCIA NACIONAL DE ADUANAS DE MÉXICO')
+            y -= 0.42*cm
+            canvas_.drawCentredString(centro, y, BITACORA_TITULO_PRINCIPAL.upper())
+            y -= 0.42*cm
+            canvas_.setFillColor(colors.HexColor('#1F5647'))
+            canvas_.drawCentredString(centro, y, unidad_admin.upper())
+            canvas_.setFillColor(colors.black)
+
+            y -= 0.5*cm
+            canvas_.setFont('Helvetica-Oblique', 7)
+            canvas_.setFillColor(colors.HexColor('#595959'))
+            canvas_.drawRightString(derecha, y, metadata_linea)
+            canvas_.setFillColor(colors.black)
+
+            if os.path.exists(ANAM_LOGO_PATH):
+                logo_w = 8*cm
+                logo_h = logo_w * (150/889)
+                canvas_.drawImage(ANAM_LOGO_PATH, 1.2*cm, y - logo_h - 0.2*cm,
+                                  width=logo_w, height=logo_h, mask='auto', preserveAspectRatio=True)
+            canvas_.restoreState()
+
+        elements = []
+
+        data = [headers]
         for r in qs:
-            data.append([
-                Paragraph(fmt(r.fechaHora), cell_style),
-                Paragraph(r.usuario, cell_style),
-                Paragraph(r.rol, cell_style),
-                Paragraph(ACCION_LABELS.get(r.accion, r.accion), cell_style),
-                Paragraph(r.fusFolio or '—', cell_style),
-                Paragraph(r.estadoAnterior or '—', cell_style),
-                Paragraph(r.estadoNuevo or '—', cell_style),
-            ])
+            data.append([Paragraph(str(col_defs[c][1](r)), cell_style) for c in columnas])
 
-        t = Table(data, colWidths=[3.8*cm, 5*cm, 1.8*cm, 3.5*cm, 4*cm, 2.5*cm, 2.5*cm], repeatRows=1)
+        col_width = ancho_total / len(columnas)
+        t = Table(data, colWidths=[col_width] * len(columnas), repeatRows=1)
         t.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#9F2241')),
-            ('TEXTCOLOR',  (0, 0), (-1, 0), colors.white),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#FFFF00')),
+            ('TEXTCOLOR',  (0, 0), (-1, 0), colors.black),
             ('FONTNAME',   (0, 0), (-1, 0), 'Helvetica-Bold'),
             ('FONTSIZE',   (0, 0), (-1, 0), 8.5),
-            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F9F4F6')]),
-            ('GRID',       (0, 0), (-1, -1), 0.4, colors.HexColor('#DDD0D5')),
+            ('ALIGN',      (0, 0), (-1, 0), 'CENTER'),
+            ('GRID',       (0, 0), (-1, -1), 0.5, colors.black),
             ('VALIGN',     (0, 0), (-1, -1), 'TOP'),
             ('TOPPADDING', (0, 0), (-1, -1), 3),
             ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
         ]))
         elements.append(t)
 
-        doc.build(elements)
+        doc.build(elements, onFirstPage=_encabezado_bitacora, onLaterPages=_encabezado_bitacora)
         buf.seek(0)
         resp = HttpResponse(buf, content_type='application/pdf')
         resp['Content-Disposition'] = 'attachment; filename="bitacora.pdf"'
@@ -861,9 +1104,13 @@ class DescargarFUSPDFView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, folio):
+        from django.conf import settings
         from django.http import HttpResponse
-        from reportlab.lib.pagesizes import A4
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+        from reportlab.lib.pagesizes import letter
+        from reportlab.platypus import (
+            SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+            HRFlowable, Image as RLImage, PageBreak, KeepTogether,
+        )
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.lib import colors
         from reportlab.lib.units import cm
@@ -872,75 +1119,73 @@ class DescargarFUSPDFView(APIView):
         try:
             fus = FUS.objects.select_related(
                 'idSolicitanteInterno', 'idMedioRecepcion', 'estatusParticular'
+            ).prefetch_related(
+                'evidencias', 'turnados__idDestinatario', 'turnados__idMedio', 'turnados__seguimientos'
             ).get(folio=folio, activo=1)
         except FUS.DoesNotExist:
             from rest_framework.response import Response
             return Response({'detail': 'FUS no encontrado.'}, status=404)
 
-        bitacora = Bitacora.objects.filter(fusFolio=folio).order_by('fechaHora')
+        incluir_imagenes = request.query_params.get('imagenes') == '1'
+
+        evidencias = [e for e in fus.evidencias.all() if e.activo]
+        turnados = [t for t in fus.turnados.all() if t.activo]
+
+        LETTERHEAD_PATH = os.path.join(os.path.dirname(__file__), 'assets', 'membretada.png')
+
+        def _membrete(canvas_, doc_):
+            canvas_.saveState()
+            if os.path.exists(LETTERHEAD_PATH):
+                canvas_.drawImage(
+                    LETTERHEAD_PATH, 0, 0,
+                    width=letter[0], height=letter[1],
+                    mask='auto', preserveAspectRatio=False,
+                )
+            canvas_.restoreState()
 
         buf = io.BytesIO()
-        doc = SimpleDocTemplate(buf, pagesize=A4,
+        doc = SimpleDocTemplate(buf, pagesize=letter,
                                 leftMargin=2*cm, rightMargin=2*cm,
-                                topMargin=2*cm, bottomMargin=2*cm)
-        W = A4[0] - 4*cm  # usable width ≈ 17 cm
+                                topMargin=3.3*cm, bottomMargin=2.8*cm)
+        W = letter[0] - 4*cm  # ancho útil
 
-        VERDE  = colors.HexColor('#1F5647')
-        DORADO = colors.HexColor('#BC955C')
-        CLARO  = colors.HexColor('#F0F5F3')
-        BORDE  = colors.HexColor('#C3D4CF')
+        VERDE    = colors.black
+        AMARILLO = colors.HexColor('#FFFF00')
+        CLARO    = colors.white
+        BORDE    = colors.black
 
         styles = getSampleStyleSheet()
 
-        st_titulo = ParagraphStyle('titulo', fontName='Helvetica-Bold', fontSize=18,
-                                   textColor=VERDE, spaceAfter=2)
+        st_titulo = ParagraphStyle('titulo', fontName='Helvetica-Bold', fontSize=16,
+                                   textColor=colors.black, spaceAfter=2)
         st_folio  = ParagraphStyle('folio',  fontName='Helvetica-Bold', fontSize=11,
-                                   textColor=DORADO, spaceAfter=8)
+                                   textColor=colors.black, spaceBefore=6, spaceAfter=8)
         st_sec    = ParagraphStyle('sec',    fontName='Helvetica-Bold', fontSize=9,
-                                   textColor=colors.white, spaceAfter=0)
+                                   textColor=colors.black, spaceAfter=0)
         st_lbl    = ParagraphStyle('lbl',    fontName='Helvetica-Bold', fontSize=8,
-                                   textColor=colors.HexColor('#3a3a3a'))
+                                   textColor=colors.black)
         st_val    = ParagraphStyle('val',    fontName='Helvetica',      fontSize=8,
-                                   textColor=colors.HexColor('#1a1a1a'), leading=11)
-        st_bita   = ParagraphStyle('bita',   fontName='Helvetica',      fontSize=7,
-                                   textColor=colors.HexColor('#1a1a1a'), leading=10)
+                                   textColor=colors.black, leading=11)
 
         fmt = lambda d: d.strftime('%d/%m/%Y %H:%M') if d else '—'
 
         sol = fus.idSolicitanteInterno
-        nombre_sol = f"{sol.first_name} {sol.last_name}".strip() if sol else '—'
-        if not nombre_sol:
-            nombre_sol = sol.email if sol else '—'
-
-        ACCION_LABELS = {
-            'REGISTRO_FUS': 'Registro FUS', 'TURNAR_FUS': 'Turnar FUS',
-            'ASIGNACION_ESTADO': 'Cambio de estado',
-            'REGISTRO_RESPUESTA': 'Registro respuesta',
-            'REGISTRO_ACCION': 'Registro acción', 'CONCLUSION_FUS': 'Conclusión FUS',
-            'INICIO_SESION': 'Inicio sesión', 'CIERRE_SESION': 'Cierre sesión',
-            'RESTABLECER_CONTRASENA': 'Restablecer contraseña',
-            'ELIMINACION': 'Eliminación',
-        }
+        nombre_sol = resolver_nombre(sol) if sol else '—'
 
         elements = []
 
         # ── Encabezado ──
-        hdr_data = [[
-            Paragraph('FORMATO ÚNICO DE SOLICITUD', st_titulo),
-            Paragraph(f'Folio: {fus.folio}', st_folio),
-        ]]
-        hdr_table = Table(hdr_data, colWidths=[11*cm, W - 11*cm])
-        hdr_table.setStyle(TableStyle([
-            ('VALIGN', (0,0), (-1,-1), 'BOTTOM'),
-            ('ALIGN',  (1,0), (1,0),   'RIGHT'),
-        ]))
-        elements.append(hdr_table)
+        elements.append(Paragraph('FORMATO ÚNICO DE SOLICITUD', st_titulo))
+        elements.append(Paragraph(
+            f'Folio: {fus.folio} &nbsp;|&nbsp; Estatus: {fus.estatusParticular_id}',
+            st_folio,
+        ))
         elements.append(HRFlowable(width='100%', thickness=2, color=VERDE, spaceAfter=10))
 
         def seccion(titulo):
             t = Table([[Paragraph(titulo, st_sec)]], colWidths=[W])
             t.setStyle(TableStyle([
-                ('BACKGROUND', (0,0), (-1,-1), VERDE),
+                ('BACKGROUND', (0,0), (-1,-1), AMARILLO),
                 ('TOPPADDING',    (0,0), (-1,-1), 4),
                 ('BOTTOMPADDING', (0,0), (-1,-1), 4),
                 ('LEFTPADDING',   (0,0), (-1,-1), 8),
@@ -951,15 +1196,10 @@ class DescargarFUSPDFView(APIView):
             return [Paragraph(lbl, st_lbl), Paragraph(str(val) if val else '—', st_val)]
 
         # ── Datos generales ──
-        elements.append(seccion('DATOS GENERALES'))
-        elements.append(Spacer(1, 4))
         datos = [
-            fila('Fecha y hora',      fmt(fus.fechaHora)),
-            fila('Solicitante',       nombre_sol),
-            fila('Medio de recepción', fus.idMedioRecepcion.nombreMedio if fus.idMedioRecepcion else '—'),
-            fila('Especificación',    fus.medioEspecificacion or '—'),
-            fila('Prioridad',         fus.prioridad or '—'),
-            fila('Estatus',           fus.estatusParticular_id),
+            fila('Fecha y hora',        fmt(fus.fechaHora)),
+            fila('Medio de recepción',  fus.idMedioRecepcion.nombreMedio if fus.idMedioRecepcion else '—'),
+            fila('Solicitante interno', nombre_sol),
         ]
         dt = Table(datos, colWidths=[4*cm, W - 4*cm])
         dt.setStyle(TableStyle([
@@ -970,14 +1210,13 @@ class DescargarFUSPDFView(APIView):
             ('LEFTPADDING',    (0,0), (-1,-1), 6),
             ('RIGHTPADDING',   (0,0), (-1,-1), 6),
         ]))
-        elements += [dt, Spacer(1, 8)]
+        elements.append(KeepTogether([seccion('DATOS GENERALES'), Spacer(1, 4), dt]))
+        elements.append(Spacer(1, 8))
 
         # ── Descripción ──
-        elements.append(seccion('DESCRIPCIÓN DE LA SOLICITUD'))
-        elements.append(Spacer(1, 4))
         desc_data = [
             fila('Descripción', fus.descripcion),
-            fila('Contexto',    fus.contexto or '—'),
+            fila('Datos o antecedentes de contexto de la solicitud', fus.contexto or '—'),
         ]
         dt2 = Table(desc_data, colWidths=[4*cm, W - 4*cm])
         dt2.setStyle(TableStyle([
@@ -989,12 +1228,11 @@ class DescargarFUSPDFView(APIView):
             ('RIGHTPADDING',   (0,0), (-1,-1), 6),
             ('VALIGN',         (0,0), (-1,-1), 'TOP'),
         ]))
-        elements += [dt2, Spacer(1, 8)]
+        elements.append(KeepTogether([seccion('DESCRIPCIÓN DE LA SOLICITUD'), Spacer(1, 4), dt2]))
+        elements.append(Spacer(1, 8))
 
         # ── Solicitante externo ──
         if fus.nombreExterno or fus.correoExterno or fus.telefonoExterno:
-            elements.append(seccion('SOLICITANTE EXTERNO'))
-            elements.append(Spacer(1, 4))
             ext_data = [
                 fila('Nombre',    fus.nombreExterno),
                 fila('Correo',    fus.correoExterno),
@@ -1009,37 +1247,101 @@ class DescargarFUSPDFView(APIView):
                 ('LEFTPADDING',    (0,0), (-1,-1), 6),
                 ('RIGHTPADDING',   (0,0), (-1,-1), 6),
             ]))
-            elements += [dt3, Spacer(1, 8)]
+            elements.append(KeepTogether([seccion('SOLICITANTE EXTERNO'), Spacer(1, 4), dt3]))
+            elements.append(Spacer(1, 8))
 
-        # ── Historial ──
-        if bitacora.exists():
-            elements.append(seccion('HISTORIAL DE ACCIONES'))
-            elements.append(Spacer(1, 4))
-            h_data = [['Fecha y hora', 'Usuario', 'Acción', 'Estado ant.', 'Estado nuevo', 'Observaciones']]
-            for b in bitacora:
-                h_data.append([
-                    Paragraph(fmt(b.fechaHora), st_bita),
-                    Paragraph(b.usuario or '—', st_bita),
-                    Paragraph(ACCION_LABELS.get(b.accion, b.accion), st_bita),
-                    Paragraph(b.estadoAnterior or '—', st_bita),
-                    Paragraph(b.estadoNuevo    or '—', st_bita),
-                    Paragraph(b.observaciones  or '—', st_bita),
-                ])
-            ht = Table(h_data, colWidths=[3.2*cm, 3.5*cm, 2.8*cm, 2*cm, 2*cm, W - 13.5*cm], repeatRows=1)
-            ht.setStyle(TableStyle([
-                ('BACKGROUND',    (0,0), (-1,0),  VERDE),
-                ('TEXTCOLOR',     (0,0), (-1,0),  colors.white),
-                ('FONTNAME',      (0,0), (-1,0),  'Helvetica-Bold'),
-                ('FONTSIZE',      (0,0), (-1,0),  7),
-                ('ROWBACKGROUNDS',(0,1), (-1,-1),  [colors.white, CLARO]),
-                ('GRID',          (0,0), (-1,-1),  0.3, BORDE),
-                ('VALIGN',        (0,0), (-1,-1),  'TOP'),
-                ('TOPPADDING',    (0,0), (-1,-1),  3),
-                ('BOTTOMPADDING', (0,0), (-1,-1),  3),
-                ('LEFTPADDING',   (0,0), (-1,-1),  4),
-                ('RIGHTPADDING',  (0,0), (-1,-1),  4),
+        # ── Evidencia (solo nombres de archivo; las imágenes van al final si se solicitaron) ──
+        if evidencias:
+            ev_rows = []
+            for ev in evidencias:
+                texto = ev.nombreArchivo or '—'
+                if ev.comentarios:
+                    texto += f' — {ev.comentarios}'
+                ev_rows.append([Paragraph(texto, st_val)])
+            evt = Table(ev_rows, colWidths=[W])
+            evt.setStyle(TableStyle([
+                ('ROWBACKGROUNDS', (0,0), (-1,-1), [colors.white, CLARO]),
+                ('GRID',           (0,0), (-1,-1), 0.3, BORDE),
+                ('TOPPADDING',     (0,0), (-1,-1), 5),
+                ('BOTTOMPADDING',  (0,0), (-1,-1), 5),
+                ('LEFTPADDING',    (0,0), (-1,-1), 8),
             ]))
-            elements.append(ht)
+            elements.append(KeepTogether([seccion('EVIDENCIA'), Spacer(1, 4), evt]))
+        else:
+            elements.append(KeepTogether([seccion('EVIDENCIA'), Spacer(1, 4), Paragraph('—', st_val)]))
+        elements.append(Spacer(1, 8))
+
+        # ── Prioridad ──
+        prioridad_bloque = [seccion('PRIORIDAD'), Spacer(1, 4), Paragraph(f'<b>{fus.prioridad or "—"}</b>', st_val)]
+        if fus.criterios:
+            prioridad_bloque.append(Spacer(1, 2))
+            for crit in [c.strip() for c in fus.criterios.split('|') if c.strip()]:
+                prioridad_bloque.append(Paragraph(f'• {crit}', st_val))
+        elements.append(KeepTogether(prioridad_bloque))
+        elements.append(Spacer(1, 8))
+
+        # ── Se turnó ──
+        if turnados:
+            for i, t in enumerate(turnados):
+                dest_nombre = resolver_nombre(t.idDestinatario) if t.idDestinatario else '—'
+                turno_data = [
+                    fila('Nombre',             dest_nombre),
+                    fila('Medio de envío',     t.idMedio.nombreMedio if t.idMedio else '—'),
+                    fila('Fecha y hora',       fmt(t.fechaHoraTurnado)),
+                    fila('Texto de la solicitud', t.solicitudTexto or '—'),
+                ]
+                tnt = Table(turno_data, colWidths=[4*cm, W - 4*cm])
+                tnt.setStyle(TableStyle([
+                    ('ROWBACKGROUNDS', (0,0), (-1,-1), [colors.white, CLARO]),
+                    ('GRID',           (0,0), (-1,-1), 0.3, BORDE),
+                    ('TOPPADDING',     (0,0), (-1,-1), 4),
+                    ('BOTTOMPADDING',  (0,0), (-1,-1), 4),
+                    ('LEFTPADDING',    (0,0), (-1,-1), 6),
+                    ('RIGHTPADDING',   (0,0), (-1,-1), 6),
+                    ('VALIGN',         (0,0), (-1,-1), 'TOP'),
+                ]))
+                bloque = [seccion('SE TURNÓ'), Spacer(1, 4), tnt] if i == 0 else [tnt]
+                elements.append(KeepTogether(bloque))
+                elements.append(Spacer(1, 6))
+
+        # ── Respuesta y seguimiento ──
+        turnados_con_seguimiento = [
+            (t, [s for s in t.seguimientos.all() if s.activo]) for t in turnados
+        ]
+        turnados_con_seguimiento = [(t, segs) for t, segs in turnados_con_seguimiento if segs]
+
+        if turnados:
+            if turnados_con_seguimiento:
+                for i, (t, segs) in enumerate(turnados_con_seguimiento):
+                    dest_nombre = resolver_nombre(t.idDestinatario) if t.idDestinatario else '—'
+                    seg_rows = []
+                    for s in segs:
+                        fecha_str = s.fechaActividad.strftime('%d/%m/%Y') if s.fechaActividad else '—'
+                        texto = s.descripcionActividad or '—'
+                        if s.accionTexto:
+                            texto += f'<br/>→ {s.accionTexto}'
+                        seg_rows.append([Paragraph(fecha_str, st_val), Paragraph(texto, st_val)])
+                    segt = Table(seg_rows, colWidths=[3*cm, W - 3*cm])
+                    segt.setStyle(TableStyle([
+                        ('ROWBACKGROUNDS', (0,0), (-1,-1), [colors.white, CLARO]),
+                        ('GRID',           (0,0), (-1,-1), 0.3, BORDE),
+                        ('TOPPADDING',     (0,0), (-1,-1), 4),
+                        ('BOTTOMPADDING',  (0,0), (-1,-1), 4),
+                        ('LEFTPADDING',    (0,0), (-1,-1), 6),
+                        ('RIGHTPADDING',   (0,0), (-1,-1), 6),
+                        ('VALIGN',         (0,0), (-1,-1), 'TOP'),
+                    ]))
+                    bloque = [Paragraph(dest_nombre, st_lbl), Spacer(1, 2), segt]
+                    if i == 0:
+                        bloque = [seccion('RESPUESTA Y SEGUIMIENTO'), Spacer(1, 4)] + bloque
+                    elements.append(KeepTogether(bloque))
+                    elements.append(Spacer(1, 8))
+            else:
+                elements.append(KeepTogether([
+                    seccion('RESPUESTA Y SEGUIMIENTO'), Spacer(1, 4),
+                    Paragraph('Pendiente de respuesta del titular.', st_val),
+                ]))
+                elements.append(Spacer(1, 8))
 
         # ── Pie ──
         elements.append(Spacer(1, 12))
@@ -1053,7 +1355,34 @@ class DescargarFUSPDFView(APIView):
             pie
         ))
 
-        doc.build(elements)
+        # ── Anexo de imágenes de evidencia (hoja nueva, al final) ──
+        if incluir_imagenes:
+            imagenes = [e for e in evidencias if (e.tipoMime or '').startswith('image/')]
+            rutas_validas = []
+            for ev in imagenes:
+                ruta_abs = os.path.join(settings.MEDIA_ROOT, ev.rutaArchivo or '')
+                if ev.rutaArchivo and os.path.exists(ruta_abs):
+                    rutas_validas.append((ev, ruta_abs))
+
+            if rutas_validas:
+                elements.append(PageBreak())
+                elements.append(Paragraph('ANEXO — IMÁGENES DE EVIDENCIA', st_titulo))
+                elements.append(HRFlowable(width='100%', thickness=2, color=VERDE, spaceAfter=12))
+                max_w, max_h = W, 20*cm
+                for ev, ruta_abs in rutas_validas:
+                    elements.append(Paragraph(ev.nombreArchivo or '—', st_lbl))
+                    elements.append(Spacer(1, 4))
+                    try:
+                        img = RLImage(ruta_abs)
+                        ratio = min(max_w / img.imageWidth, max_h / img.imageHeight, 1)
+                        img.drawWidth  = img.imageWidth * ratio
+                        img.drawHeight = img.imageHeight * ratio
+                        elements.append(img)
+                    except Exception:
+                        elements.append(Paragraph('(No se pudo cargar la imagen)', st_val))
+                    elements.append(Spacer(1, 16))
+
+        doc.build(elements, onFirstPage=_membrete, onLaterPages=_membrete)
         buf.seek(0)
         resp = HttpResponse(buf, content_type='application/pdf')
         resp['Content-Disposition'] = f'attachment; filename="FUS_{folio}.pdf"'

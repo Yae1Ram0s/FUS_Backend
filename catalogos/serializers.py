@@ -1,5 +1,11 @@
 from rest_framework import serializers
-from .models import MedioRecepcion, PrioridadCriterio, Estatus
+from .models import MedioRecepcion, PrioridadCriterio, Estatus, UnidadAdministrativa
+
+
+class UnidadAdministrativaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = UnidadAdministrativa
+        fields = ['idUnidadAdministrativa', 'clave', 'unidadAdministrativa', 'esUnidadAdministrativa', 'esUnidadDeNegocio']
 
 
 class MedioRecepcionSerializer(serializers.ModelSerializer):

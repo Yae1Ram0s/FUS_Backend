@@ -2,12 +2,18 @@ from rest_framework import serializers
 from django.contrib.auth.models import User
 from catalogos.models import MedioRecepcion
 from .models import FUS, Evidencia, Turnado, Seguimiento, Notificacion, Bitacora
+from .utils import resolver_nombre
 
 
 class UserMiniSerializer(serializers.ModelSerializer):
+    nombre = serializers.SerializerMethodField()
+
     class Meta:
         model  = User
-        fields = ['id', 'first_name', 'last_name', 'email']
+        fields = ['id', 'first_name', 'last_name', 'email', 'nombre']
+
+    def get_nombre(self, obj):
+        return resolver_nombre(obj)
 
 
 class MedioMiniSerializer(serializers.ModelSerializer):
@@ -19,7 +25,7 @@ class MedioMiniSerializer(serializers.ModelSerializer):
 class EvidenciaSerializer(serializers.ModelSerializer):
     class Meta:
         model  = Evidencia
-        fields = ['id', 'nombreArchivo', 'tipoMime', 'fechaCarga', 'rutaArchivo']
+        fields = ['id', 'nombreArchivo', 'tipoMime', 'fechaCarga', 'rutaArchivo', 'comentarios']
 
 
 class FUSSerializer(serializers.ModelSerializer):
@@ -34,7 +40,7 @@ class FUSSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'folio', 'idSolicitanteInterno', 'fechaHora',
             'descripcion', 'contexto', 'idMedioRecepcion', 'medioEspecificacion',
-            'prioridad', 'estatusParticular', 'fechaConclusion',
+            'prioridad', 'criterios', 'estatusParticular', 'fechaConclusion',
             'nombreExterno', 'telefonoExterno', 'correoExterno', 'evidencias',
         ]
 

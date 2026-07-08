@@ -17,6 +17,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from .models import CorreoAutorizado, CodigoOTP
 from .serializers import LoginSerializer, UsuarioROL2Serializer
 from solicitudes.utils import get_rol, log_bitacora as _log
+from catalogos.models import UnidadAdministrativa
 
 
 class LoginThrottle(AnonRateThrottle):
@@ -140,7 +141,7 @@ class EstablecerContrasenaView(APIView):
             )
 
         try:
-            autorizado = CorreoAutorizado.objects.get(email=email, activo=1)
+            autorizado = CorreoAutorizado.objects.select_related('unidadAdministrativa').get(email=email, activo=1)
         except CorreoAutorizado.DoesNotExist:
             return Response({'detail': 'Correo no autorizado.'}, status=status.HTTP_401_UNAUTHORIZED)
 
@@ -165,6 +166,7 @@ class EstablecerContrasenaView(APIView):
                 'email':  email,
                 'nombre': autorizado.nombre,
                 'rol':    autorizado.rol,
+                'unidadAdministrativa': autorizado.unidadAdministrativa.unidadAdministrativa if autorizado.unidadAdministrativa_id else None,
             },
         })
 
@@ -218,7 +220,7 @@ class LoginView(APIView):
         ip       = request.META.get('REMOTE_ADDR')
 
         try:
-            autorizado = CorreoAutorizado.objects.get(email=email, activo=1)
+            autorizado = CorreoAutorizado.objects.select_related('unidadAdministrativa').get(email=email, activo=1)
         except CorreoAutorizado.DoesNotExist:
             return Response({'detail': 'Correo no autorizado.'}, status=status.HTTP_401_UNAUTHORIZED)
 
@@ -242,6 +244,7 @@ class LoginView(APIView):
                 'email':  email,
                 'nombre': autorizado.nombre or f"{user.first_name} {user.last_name}".strip(),
                 'rol':    autorizado.rol,
+                'unidadAdministrativa': autorizado.unidadAdministrativa.unidadAdministrativa if autorizado.unidadAdministrativa_id else None,
             }
         })
 
@@ -375,7 +378,7 @@ class CorreoAutorizadoListView(APIView):
         if not _es_adm(request.user):
             return Response({'detail': 'No autorizado.'}, status=403)
 
-        qs = CorreoAutorizado.objects.all().order_by('rol', 'email')
+        qs = CorreoAutorizado.objects.select_related('unidadAdministrativa').all().order_by('rol', 'email')
         busqueda = request.query_params.get('search')
         rol      = request.query_params.get('rol')
         if busqueda: qs = qs.filter(email__icontains=busqueda) | qs.filter(nombre__icontains=busqueda)
@@ -388,6 +391,8 @@ class CorreoAutorizadoListView(APIView):
             'rol':    c.rol,
             'activo': c.activo,
             'tiene_cuenta': User.objects.filter(email=c.email).exists(),
+            'unidadAdministrativa': c.unidadAdministrativa_id,
+            'unidadAdministrativaNombre': c.unidadAdministrativa.unidadAdministrativa if c.unidadAdministrativa_id else None,
         } for c in qs]
         return Response(data)
 
@@ -398,6 +403,7 @@ class CorreoAutorizadoListView(APIView):
         email  = request.data.get('email', '').strip().lower()
         nombre = request.data.get('nombre', '').strip()
         rol    = request.data.get('rol', 'ROL1')
+        unidad_id = request.data.get('unidadAdministrativa') or None
 
         if not email or not nombre:
             return Response({'detail': 'Email y nombre son requeridos.'}, status=400)
@@ -405,13 +411,18 @@ class CorreoAutorizadoListView(APIView):
             return Response({'detail': 'Rol inválido.'}, status=400)
         if CorreoAutorizado.objects.filter(email=email).exists():
             return Response({'detail': 'Este correo ya está registrado.'}, status=400)
+        if unidad_id and not UnidadAdministrativa.objects.filter(pk=unidad_id, activo=1).exists():
+            return Response({'detail': 'Unidad administrativa inválida.'}, status=400)
 
         c = CorreoAutorizado.objects.create(
             email=email, nombre=nombre, rol=rol,
+            unidadAdministrativa_id=unidad_id,
             idUsuarioRegistra=request.user.id,
         )
-        return Response({'id': c.id, 'email': c.email, 'nombre': c.nombre, 'rol': c.rol, 'activo': c.activo},
-                        status=201)
+        return Response({
+            'id': c.id, 'email': c.email, 'nombre': c.nombre, 'rol': c.rol, 'activo': c.activo,
+            'unidadAdministrativa': c.unidadAdministrativa_id,
+        }, status=201)
 
 
 class CorreoAutorizadoDetailView(APIView):
@@ -433,6 +444,11 @@ class CorreoAutorizadoDetailView(APIView):
             c.rol = request.data['rol']
         if 'nombre' in request.data:
             c.nombre = request.data['nombre'].strip()
+        if 'unidadAdministrativa' in request.data:
+            unidad_id = request.data['unidadAdministrativa'] or None
+            if unidad_id and not UnidadAdministrativa.objects.filter(pk=unidad_id, activo=1).exists():
+                return Response({'detail': 'Unidad administrativa inválida.'}, status=400)
+            c.unidadAdministrativa_id = unidad_id
 
         if 'email' in request.data:
             nuevo_email = request.data['email'].strip().lower()
@@ -452,4 +468,7 @@ class CorreoAutorizadoDetailView(APIView):
         c.idUsuarioModifica = request.user.id
         c.save()
 
-        return Response({'id': c.id, 'email': c.email, 'nombre': c.nombre, 'rol': c.rol, 'activo': c.activo})
+        return Response({
+            'id': c.id, 'email': c.email, 'nombre': c.nombre, 'rol': c.rol, 'activo': c.activo,
+            'unidadAdministrativa': c.unidadAdministrativa_id,
+        })

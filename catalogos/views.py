@@ -2,8 +2,16 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
-from .models import MedioRecepcion, PrioridadCriterio, Estatus
-from .serializers import MedioRecepcionSerializer, PrioridadCriterioSerializer, EstatusSerializer
+from .models import MedioRecepcion, PrioridadCriterio, Estatus, UnidadAdministrativa
+from .serializers import MedioRecepcionSerializer, PrioridadCriterioSerializer, EstatusSerializer, UnidadAdministrativaSerializer
+
+
+class UnidadAdministrativaListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        qs = UnidadAdministrativa.objects.filter(activo=1)
+        return Response(UnidadAdministrativaSerializer(qs, many=True).data)
 
 
 class MedioRecepcionListView(APIView):
