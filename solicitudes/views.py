@@ -2,6 +2,7 @@ import datetime
 import hashlib
 import json
 import os
+import uuid
 
 ALLOWED_MIME_TYPES = {
     'application/pdf',
@@ -114,7 +115,8 @@ def _guardar_evidencias(fus, request, user):
     for i, archivo in enumerate(archivos):
         sha = _sha256(archivo)
         nombre_seguro = os.path.basename(archivo.name)
-        ruta_rel = f"evidencias/{fus.pk}/{nombre_seguro}"
+        nombre_fisico = f"{uuid.uuid4().hex}_{nombre_seguro}"
+        ruta_rel = f"evidencias/{fus.pk}/{nombre_fisico}"
         ruta_abs = os.path.join(settings.MEDIA_ROOT, ruta_rel)
         os.makedirs(os.path.dirname(ruta_abs), exist_ok=True)
         with open(ruta_abs, 'wb') as dest:
@@ -178,7 +180,6 @@ class FUSListCreateView(APIView):
         ip    = request.META.get('REMOTE_ADDR')
         now   = timezone.now()
         year  = now.year
-        folio = _generar_folio(rol, year)
 
         medio_id = data.get('idMedioRecepcion')
         medio    = get_object_or_404(MedioRecepcion, pk=medio_id) if medio_id else None
@@ -187,22 +188,33 @@ class FUSListCreateView(APIView):
         tel_ext    = data.get('telefonoExterno', '').strip() or None
         correo_ext = data.get('correoExterno', '').strip() or None
 
-        fus = FUS.objects.create(
-            folio=folio,
-            idSolicitanteInterno=user,
-            fechaHora=now,
-            descripcion=data.get('descripcion', ''),
-            contexto=data.get('contexto', ''),
-            idMedioRecepcion=medio,
-            medioEspecificacion=data.get('medioEspecificacion', ''),
-            prioridad=data.get('prioridad') or None,
-            criterios=data.get('criterios') or None,
-            nombreExterno=nombre_ext,
-            telefonoExterno=tel_ext,
-            correoExterno=correo_ext,
-            estatusParticular_id='Registrado',
-            idUsuarioRegistra=user.id,
-        )
+        from django.db import IntegrityError
+
+        fus = None
+        for intento in range(3):
+            folio = _generar_folio(rol, year)
+            try:
+                fus = FUS.objects.create(
+                    folio=folio,
+                    idSolicitanteInterno=user,
+                    fechaHora=now,
+                    descripcion=data.get('descripcion', ''),
+                    contexto=data.get('contexto', ''),
+                    idMedioRecepcion=medio,
+                    medioEspecificacion=data.get('medioEspecificacion', ''),
+                    prioridad=data.get('prioridad') or None,
+                    criterios=data.get('criterios') or None,
+                    nombreExterno=nombre_ext,
+                    telefonoExterno=tel_ext,
+                    correoExterno=correo_ext,
+                    estatusParticular_id='Registrado',
+                    idUsuarioRegistra=user.id,
+                )
+                break
+            except IntegrityError:
+                if intento == 2:
+                    raise
+                continue
 
         err_resp = _guardar_evidencias(fus, request, user)
         if err_resp:
@@ -298,7 +310,14 @@ class TurnarFUSView(APIView):
 
         for dest in destinatarios:
             dest_user = get_object_or_404(User, pk=dest['idDestinatario'])
+            if _rol(dest_user) != 'ROL2':
+                return Response({'detail': 'Destinatario inválido: debe ser un usuario ROL2 activo.'}, status=400)
             medio     = get_object_or_404(MedioRecepcion, pk=dest['idMedio'])
+
+            ya_turnado = Turnado.objects.filter(idFus=fus, idDestinatario=dest_user, activo=1).exclude(estatusTitular_id='Concluido').exists()
+            if ya_turnado:
+                continue  # ya tiene un turnado activo, no duplicar
+
             Turnado.objects.create(
                 idFus=fus,
                 idRemitente=user,
@@ -690,7 +709,10 @@ class BitacoraListView(APIView):
 
     def get(self, request):
         rol = _rol(request.user)
-        qs  = _bitacora_base_qs(request).order_by('-fechaHora')
+        ordering = request.query_params.get('ordering')
+        qs = _bitacora_base_qs(request)
+        if not ordering:
+            qs = qs.order_by('-fechaHora')
         qs  = _aplicar_filtros_bitacora(qs, request.query_params, rol)
 
         try:
@@ -698,6 +720,15 @@ class BitacoraListView(APIView):
             page_size = min(100, max(1, int(request.query_params.get('page_size', 50))))
         except (ValueError, TypeError):
             page, page_size = 1, 50
+
+        ORDERING_MAP = {
+            'folio': 'fusFolio', 'fecha': 'fechaHora', 'accion': 'accion',
+        }
+        if ordering:
+            campo = ordering.lstrip('-')
+            campo_real = ORDERING_MAP.get(campo)
+            if campo_real:
+                qs = qs.order_by(f"{'-' if ordering.startswith('-') else ''}{campo_real}")
 
         total  = qs.count()
         offset = (page - 1) * page_size

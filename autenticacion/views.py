@@ -3,7 +3,10 @@ import string
 
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.mail import send_mail
+from django.db import IntegrityError
 from django.utils import timezone
 from datetime import timedelta
 
@@ -121,11 +124,10 @@ class EstablecerContrasenaView(APIView):
         codigo   = request.data.get('codigo', '').strip()
         password = request.data.get('password', '')
 
-        if len(password) < 8:
-            return Response(
-                {'detail': 'La contraseña debe tener al menos 8 caracteres.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        try:
+            validate_password(password)
+        except DjangoValidationError as e:
+            return Response({'detail': ' '.join(e.messages)}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             otp = CodigoOTP.objects.get(
@@ -145,12 +147,15 @@ class EstablecerContrasenaView(APIView):
         except CorreoAutorizado.DoesNotExist:
             return Response({'detail': 'Correo no autorizado.'}, status=status.HTTP_401_UNAUTHORIZED)
 
-        user = User.objects.create_user(
-            username=email,
-            email=email,
-            password=password,
-            first_name=autorizado.nombre,
-        )
+        try:
+            user = User.objects.create_user(
+                username=email,
+                email=email,
+                password=password,
+                first_name=autorizado.nombre,
+            )
+        except IntegrityError:
+            return Response({'detail': 'Esta cuenta ya fue creada. Intenta iniciar sesión.'}, status=400)
 
         otp.usado = 1
         otp.save()
@@ -313,11 +318,10 @@ class RestablecerContrasenaView(APIView):
         codigo   = request.data.get('codigo', '').strip()
         password = request.data.get('password', '')
 
-        if len(password) < 8:
-            return Response(
-                {'detail': 'La contraseña debe tener al menos 8 caracteres.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        try:
+            validate_password(password)
+        except DjangoValidationError as e:
+            return Response({'detail': ' '.join(e.messages)}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             otp = CodigoOTP.objects.get(

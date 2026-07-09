@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth.models import User
+from autenticacion.models import CorreoAutorizado
 from catalogos.models import MedioRecepcion
 from .models import FUS, Evidencia, Turnado, Seguimiento, Notificacion, Bitacora
 from .utils import resolver_nombre
@@ -78,14 +79,21 @@ class TurnadoSerializer(serializers.ModelSerializer):
 
 class BitacoraSerializer(serializers.ModelSerializer):
     nombre = serializers.SerializerMethodField()
+    unidadAdministrativa = serializers.SerializerMethodField()
 
     def get_nombre(self, obj):
         return self.context.get('nombres_map', {}).get(obj.usuario, '')
 
+    def get_unidadAdministrativa(self, obj):
+        autorizado = CorreoAutorizado.objects.select_related('unidadAdministrativa').filter(email=obj.usuario).first()
+        if autorizado and autorizado.unidadAdministrativa_id:
+            return autorizado.unidadAdministrativa.unidadAdministrativa
+        return None
+
     class Meta:
         model  = Bitacora
         fields = ['id', 'fusFolio', 'fechaHora', 'usuario', 'nombre', 'rol', 'accion',
-                  'estadoAnterior', 'estadoNuevo', 'ipCliente', 'observaciones']
+                  'estadoAnterior', 'estadoNuevo', 'ipCliente', 'observaciones', 'unidadAdministrativa']
 
 
 class TurnadoActividadSerializer(serializers.ModelSerializer):
