@@ -4,6 +4,7 @@ from .views import (
     FUSDetailView,
     TurnarFUSView,
     FUSActividadView,
+    FUSDetalleAuditoriaView,
     ConcluirTurnadoView,
     MisTurnadosView,
     SeguimientoListCreateView,
@@ -25,6 +26,7 @@ urlpatterns = [
     path('fus/<int:pk>/',                      FUSDetailView.as_view(),          name='fus-detail'),
     path('fus/<int:pk>/turnar/',               TurnarFUSView.as_view(),          name='fus-turnar'),
     path('fus/<int:pk>/actividad/',            FUSActividadView.as_view(),       name='fus-actividad'),
+    path('fus/detalle-auditoria/<path:folio>/', FUSDetalleAuditoriaView.as_view(), name='fus-detalle-auditoria'),
 
     # Turnados ROL2
     path('turnados/mis-turnados/',             MisTurnadosView.as_view(),        name='mis-turnados'),

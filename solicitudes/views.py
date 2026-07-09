@@ -28,6 +28,7 @@ def _validar_archivo(archivo):
 
 
 from django.contrib.auth.models import User
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
@@ -237,7 +238,7 @@ class FUSDetailView(APIView):
             return Response({'detail': 'No autorizado.'}, status=403)
         fus = get_object_or_404(
             FUS.objects.select_related('idSolicitanteInterno', 'idMedioRecepcion').prefetch_related('evidencias'),
-            pk=pk, activo=1,
+            pk=pk, activo=1, idSolicitanteInterno=request.user,
         )
         return Response(FUSSerializer(fus).data)
 
@@ -247,7 +248,7 @@ class FUSDetailView(APIView):
         if rol != 'ROL1':
             return Response({'detail': 'No autorizado.'}, status=403)
 
-        fus = get_object_or_404(FUS, pk=pk, activo=1)
+        fus = get_object_or_404(FUS, pk=pk, activo=1, idSolicitanteInterno=user)
         if fus.estatusParticular_id != 'Registrado':
             return Response(
                 {'detail': 'Solo se puede editar una solicitud en estatus "Registrado".'},
@@ -288,7 +289,7 @@ class TurnarFUSView(APIView):
         if rol != 'ROL1':
             return Response({'detail': 'No autorizado.'}, status=403)
 
-        fus           = get_object_or_404(FUS, pk=pk, activo=1)
+        fus           = get_object_or_404(FUS, pk=pk, activo=1, idSolicitanteInterno=user)
         ip            = request.META.get('REMOTE_ADDR')
         destinatarios = request.data.get('destinatarios', [])
         solicitud_txt = request.data.get('solicitudTexto', '')
@@ -355,7 +356,7 @@ class FUSActividadView(APIView):
         if _rol(request.user) != 'ROL1':
             return Response({'detail': 'No autorizado.'}, status=403)
 
-        fus = get_object_or_404(FUS, pk=pk, activo=1)
+        fus = get_object_or_404(FUS, pk=pk, activo=1, idSolicitanteInterno=request.user)
         turnados = Turnado.objects.filter(
             idFus=fus, activo=1
         ).select_related(
@@ -364,6 +365,60 @@ class FUSActividadView(APIView):
             'seguimientos',
         ).order_by('fechaHoraTurnado')
         return Response(TurnadoActividadSerializer(turnados, many=True).data)
+
+
+class FUSDetalleAuditoriaView(APIView):
+    """Detalle de auditoría de un FUS por folio, para el modal de Bitácora (ROL1)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, folio):
+        if _rol(request.user) != 'ROL1':
+            return Response({'detail': 'No autorizado.'}, status=403)
+
+        fus = get_object_or_404(
+            FUS.objects.select_related('idSolicitanteInterno', 'idMedioRecepcion', 'estatusParticular'),
+            folio=folio, activo=1,
+        )
+
+        turnados = Turnado.objects.filter(idFus=fus).select_related(
+            'idDestinatario'
+        ).prefetch_related('seguimientos').order_by('fechaHoraTurnado')
+
+        seguimientos = []
+        estatus_titular = None
+        for t in turnados:
+            estatus_titular = t.estatusTitular_id
+            autor = (t.idDestinatario.first_name or t.idDestinatario.email) if t.idDestinatario else None
+            for s in t.seguimientos.all():
+                if not s.activo:
+                    continue
+                seguimientos.append({
+                    'fecha': s.fechaActividad,
+                    'autor': autor,
+                    'texto': s.descripcionActividad,
+                })
+
+        sol = fus.idSolicitanteInterno
+        return Response({
+            'folio': fus.folio,
+            'descripcion': fus.descripcion,
+            'contexto': fus.contexto,
+            'medioRecepcion': fus.idMedioRecepcion.nombreMedio if fus.idMedioRecepcion else None,
+            'prioridad': fus.prioridad,
+            'criterios': fus.criterios,
+            'nombreExterno': fus.nombreExterno,
+            'telefonoExterno': fus.telefonoExterno,
+            'correoExterno': fus.correoExterno,
+            'estatusParticular': fus.estatusParticular_id,
+            'estatusTitular': estatus_titular,
+            'fechaRegistro': fus.fechaRegistro,
+            'idSolicitanteInterno': {
+                'nombre': resolver_nombre(sol) if sol else None,
+                'email': sol.email if sol else None,
+            },
+            'evidencias': [{'nombreArchivo': e.nombreArchivo} for e in fus.evidencias.filter(activo=1)],
+            'seguimientos': seguimientos,
+        })
 
 
 # ── Turnados (ROL2) ──────────────────────────────────────────────────────────
@@ -682,6 +737,14 @@ def _aplicar_filtros_bitacora(qs, params, rol):
     estatus_fus = params.get('estatus_fus')
     fecha_desde = params.get('fecha_desde')
     fecha_hasta = params.get('fecha_hasta')
+
+    q = params.get('q')
+    if q:
+        if rol == 'ROL1':
+            emails_nombre = CorreoAutorizado.objects.filter(nombre__icontains=q).values_list('email', flat=True)
+            qs = qs.filter(Q(fusFolio__icontains=q) | Q(usuario__icontains=q) | Q(usuario__in=list(emails_nombre)))
+        else:
+            qs = qs.filter(fusFolio__icontains=q)
 
     if usuario and rol == 'ROL1': qs = qs.filter(usuario__icontains=usuario)
     if accion:      qs = qs.filter(accion=accion)
