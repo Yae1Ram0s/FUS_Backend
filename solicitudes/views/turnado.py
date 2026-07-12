@@ -10,18 +10,10 @@ from rest_framework.permissions import IsAuthenticated
 
 from autenticacion.models import CorreoAutorizado
 from catalogos.models import MedioRecepcion
-from ..models import FUS, Turnado, Seguimiento, Notificacion, Bitacora
+from ..models import FUS, Turnado, Seguimiento, Notificacion
 from ..serializers import TurnadoSerializer, TurnadoActividadSerializer, SeguimientoSerializer
 from ..utils import resolver_nombre
 from .helpers import _rol, _log
-
-ACCION_LABELS = {
-    'REGISTRO_FUS': 'Registro FUS', 'TURNAR_FUS': 'Turnar FUS',
-    'ASIGNACION_ESTADO': 'Cambio de estado', 'REGISTRO_RESPUESTA': 'Registro respuesta',
-    'REGISTRO_ACCION': 'Registro acción', 'CONCLUSION_FUS': 'Conclusión FUS',
-    'RESTABLECER_CONTRASENA': 'Restablecer contraseña',
-    'ELIMINACION': 'Eliminación',
-}
 
 
 def _push_notificacion(notif):
@@ -133,17 +125,28 @@ class FUSActividadView(APIView):
 
 
 class FUSTrazabilidadView(APIView):
-    """Línea de tiempo completa de un FUS (creación + turnados/respuestas + bitácora).
-    Sin restricción de dueño: la usan tanto Consultar FUS como Bitácora, y en
-    Bitácora un ROL1 audita folios que no necesariamente son suyos."""
+    """Línea de tiempo de un FUS (creación + turnados/respuestas). Sin restricción
+    de dueño a nivel de FUS: la usan tanto Consultar FUS como Bitácora, y en
+    Bitácora un ROL1 audita folios que no necesariamente son suyos.
+
+    ROL2 solo ve su propia porción: el turnado que le corresponde a él (no los
+    de otros destinatarios) y sus respuestas/conclusión — nada de creación,
+    que es anterior a que el asunto le llegara."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request, folio):
         fus = get_object_or_404(FUS, folio=folio, activo=1)
+        rol = _rol(request.user)
 
         eventos = []
 
-        if fus.fechaRegistro:
+        turnados_qs = Turnado.objects.filter(idFus=fus, activo=1).select_related(
+            'idDestinatario'
+        ).prefetch_related('seguimientos')
+
+        if rol == 'ROL2':
+            turnados_qs = turnados_qs.filter(idDestinatario=request.user)
+        elif fus.fechaRegistro:
             eventos.append({
                 'tipo':    'creacion',
                 'fecha':   fus.fechaRegistro,
@@ -151,11 +154,7 @@ class FUSTrazabilidadView(APIView):
                 'detalle': 'Solicitud registrada',
             })
 
-        turnados = Turnado.objects.filter(idFus=fus, activo=1).select_related(
-            'idDestinatario'
-        ).prefetch_related('seguimientos').order_by('fechaHoraTurnado')
-
-        for t in turnados:
+        for t in turnados_qs.order_by('fechaHoraTurnado'):
             actor = resolver_nombre(t.idDestinatario) if t.idDestinatario else None
             if t.fechaHoraTurnado:
                 eventos.append({
@@ -175,25 +174,6 @@ class FUSTrazabilidadView(APIView):
                     'actor':   actor,
                     'detalle': s.descripcionActividad,
                 })
-
-        registros_bitacora = Bitacora.objects.filter(
-            fusFolio=fus.folio
-        ).exclude(accion__in=['INICIO_SESION', 'CIERRE_SESION']).order_by('fechaHora')
-
-        nombres_map = dict(
-            CorreoAutorizado.objects.filter(
-                email__in=registros_bitacora.values_list('usuario', flat=True).distinct()
-            ).values_list('email', 'nombre')
-        )
-        for b in registros_bitacora:
-            eventos.append({
-                'tipo':           'bitacora',
-                'fecha':          b.fechaHora,
-                'actor':          nombres_map.get(b.usuario, b.usuario),
-                'detalle':        ACCION_LABELS.get(b.accion, b.accion),
-                'estadoAnterior': b.estadoAnterior,
-                'estadoNuevo':    b.estadoNuevo,
-            })
 
         eventos.sort(key=lambda e: e['fecha'])
 
