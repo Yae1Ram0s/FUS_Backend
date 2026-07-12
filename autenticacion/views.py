@@ -1,6 +1,7 @@
 import secrets
 import string
 
+from django.conf import settings
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
@@ -16,11 +17,21 @@ from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.throttling import AnonRateThrottle
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.exceptions import TokenError
 
 from .models import CorreoAutorizado, CodigoOTP
 from .serializers import LoginSerializer, UsuarioROL2Serializer
 from solicitudes.utils import get_rol, log_bitacora as _log
 from catalogos.models import UnidadAdministrativa
+
+
+def _set_refresh_cookie(response, refresh_token):
+    response.set_cookie(
+        'refresh_token', str(refresh_token),
+        httponly=True, secure=not settings.DEBUG, samesite='Lax',
+        max_age=int(settings.SIMPLE_JWT['REFRESH_TOKEN_LIFETIME'].total_seconds()),
+    )
+    return response
 
 
 class LoginThrottle(AnonRateThrottle):
@@ -163,9 +174,8 @@ class EstablecerContrasenaView(APIView):
         refresh = RefreshToken.for_user(user)
         _log(usuario=email, rol=autorizado.rol, accion='REGISTRO', ip=request.META.get('REMOTE_ADDR'))
 
-        return Response({
-            'access':  str(refresh.access_token),
-            'refresh': str(refresh),
+        response = Response({
+            'access': str(refresh.access_token),
             'user': {
                 'id':     user.id,
                 'email':  email,
@@ -174,6 +184,7 @@ class EstablecerContrasenaView(APIView):
                 'unidadAdministrativa': autorizado.unidadAdministrativa.unidadAdministrativa if autorizado.unidadAdministrativa_id else None,
             },
         })
+        return _set_refresh_cookie(response, refresh)
 
 
 class ReenviarOTPView(APIView):
@@ -241,9 +252,8 @@ class LoginView(APIView):
         refresh = RefreshToken.for_user(user)
         _log(usuario=email, rol=autorizado.rol, accion='INICIO_SESION', ip=ip)
 
-        return Response({
-            'access':  str(refresh.access_token),
-            'refresh': str(refresh),
+        response = Response({
+            'access': str(refresh.access_token),
             'user': {
                 'id':     user.id,
                 'email':  email,
@@ -252,6 +262,7 @@ class LoginView(APIView):
                 'unidadAdministrativa': autorizado.unidadAdministrativa.unidadAdministrativa if autorizado.unidadAdministrativa_id else None,
             }
         })
+        return _set_refresh_cookie(response, refresh)
 
 
 class LogoutView(APIView):
@@ -263,7 +274,25 @@ class LogoutView(APIView):
         autorizado = CorreoAutorizado.objects.filter(email=email, activo=1).first()
         rol        = autorizado.rol if autorizado else ''
         _log(usuario=email, rol=rol, accion='CIERRE_SESION', ip=ip)
-        return Response({'detail': 'Sesión cerrada.'})
+        response = Response({'detail': 'Sesión cerrada.'})
+        response.delete_cookie('refresh_token')
+        return response
+
+
+class CookieTokenRefreshView(APIView):
+    """Igual que TokenRefreshView de SimpleJWT, pero lee el refresh token de la
+    cookie httpOnly en vez de esperarlo en el body."""
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        raw_token = request.COOKIES.get('refresh_token')
+        if not raw_token:
+            return Response({'detail': 'No hay sesión activa.'}, status=status.HTTP_401_UNAUTHORIZED)
+        try:
+            refresh = RefreshToken(raw_token)
+        except TokenError:
+            return Response({'detail': 'Sesión expirada.'}, status=status.HTTP_401_UNAUTHORIZED)
+        return Response({'access': str(refresh.access_token)})
 
 
 class RecuperarContrasenaView(APIView):

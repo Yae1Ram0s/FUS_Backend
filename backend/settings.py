@@ -121,12 +121,15 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 # ── CORS ─────────────────────────────────────────────────────────────────────
+# CORS_ALLOW_ALL_ORIGINS ('*') no funciona con cookies cross-origin (refresh
+# token httpOnly), así que siempre se usa una lista explícita de orígenes.
 _cors_raw = os.environ.get('CORS_ORIGINS', '')
 if _cors_raw:
-    CORS_ALLOW_ALL_ORIGINS = False
     CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_raw.split(',') if o.strip()]
 else:
-    CORS_ALLOW_ALL_ORIGINS = True  # solo para desarrollo local sin .env
+    CORS_ALLOWED_ORIGINS = ['http://localhost:5173', 'https://localhost:5173']  # solo desarrollo local sin .env
+
+CORS_ALLOW_CREDENTIALS = True
 
 # ── JWT ──────────────────────────────────────────────────────────────────────
 REST_FRAMEWORK = {
