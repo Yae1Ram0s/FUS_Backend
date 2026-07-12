@@ -155,7 +155,20 @@ class FUSListCreateView(APIView):
         if estatus:
             qs = qs.filter(estatusParticular_id=estatus)
         if search:
-            qs = qs.filter(folio__icontains=search) | qs.filter(descripcion__icontains=search)
+            emails_nombre = list(CorreoAutorizado.objects.filter(nombre__icontains=search).values_list('email', flat=True))
+            qs = qs.filter(
+                Q(folio__icontains=search) |
+                Q(descripcion__icontains=search) |
+                Q(contexto__icontains=search) |
+                Q(medioEspecificacion__icontains=search) |
+                Q(criterios__icontains=search) |
+                Q(nombreExterno__icontains=search) |
+                Q(telefonoExterno__icontains=search) |
+                Q(correoExterno__icontains=search) |
+                Q(idMedioRecepcion__nombreMedio__icontains=search) |
+                Q(idSolicitanteInterno__email__icontains=search) |
+                Q(idSolicitanteInterno__email__in=emails_nombre)
+            )
 
         qs = qs.order_by('-fechaRegistro')
 
@@ -439,7 +452,20 @@ class MisTurnadosView(APIView):
         if estatus:
             qs = qs.filter(estatusTitular_id=estatus)
         if search:
-            qs = qs.filter(idFus__folio__icontains=search) | qs.filter(idFus__descripcion__icontains=search)
+            emails_nombre = list(CorreoAutorizado.objects.filter(nombre__icontains=search).values_list('email', flat=True))
+            qs = qs.filter(
+                Q(idFus__folio__icontains=search) |
+                Q(idFus__descripcion__icontains=search) |
+                Q(idFus__contexto__icontains=search) |
+                Q(idFus__medioEspecificacion__icontains=search) |
+                Q(idFus__criterios__icontains=search) |
+                Q(idFus__nombreExterno__icontains=search) |
+                Q(idFus__telefonoExterno__icontains=search) |
+                Q(idFus__correoExterno__icontains=search) |
+                Q(idFus__idMedioRecepcion__nombreMedio__icontains=search) |
+                Q(idFus__idSolicitanteInterno__email__icontains=search) |
+                Q(idFus__idSolicitanteInterno__email__in=emails_nombre)
+            )
 
         qs = qs.order_by('-fechaRegistro')
 
@@ -1063,7 +1089,21 @@ def _fus_queryset(request):
     estatus = request.query_params.get('estatusParticular')
     search  = request.query_params.get('search')
     if estatus: qs = qs.filter(estatusParticular_id=estatus)
-    if search:  qs = qs.filter(folio__icontains=search) | qs.filter(descripcion__icontains=search)
+    if search:
+        emails_nombre = list(CorreoAutorizado.objects.filter(nombre__icontains=search).values_list('email', flat=True))
+        qs = qs.filter(
+            Q(folio__icontains=search) |
+            Q(descripcion__icontains=search) |
+            Q(contexto__icontains=search) |
+            Q(medioEspecificacion__icontains=search) |
+            Q(criterios__icontains=search) |
+            Q(nombreExterno__icontains=search) |
+            Q(telefonoExterno__icontains=search) |
+            Q(correoExterno__icontains=search) |
+            Q(idMedioRecepcion__nombreMedio__icontains=search) |
+            Q(idSolicitanteInterno__email__icontains=search) |
+            Q(idSolicitanteInterno__email__in=emails_nombre)
+        )
     return qs
 
 
