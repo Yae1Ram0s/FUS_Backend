@@ -1,9 +1,9 @@
 from rest_framework import serializers
 from django.contrib.auth.models import User
-from autenticacion.models import CorreoAutorizado
 from catalogos.models import MedioRecepcion
 from .models import FUS, Evidencia, Turnado, Seguimiento, Notificacion, Bitacora
 from .utils import resolver_nombre
+from .helpers import _resolver_unidad_administrativa
 
 
 class UserMiniSerializer(serializers.ModelSerializer):
@@ -85,10 +85,8 @@ class BitacoraSerializer(serializers.ModelSerializer):
         return self.context.get('nombres_map', {}).get(obj.usuario, '')
 
     def get_unidadAdministrativa(self, obj):
-        autorizado = CorreoAutorizado.objects.select_related('unidadAdministrativa').filter(email=obj.usuario).first()
-        if autorizado and autorizado.unidadAdministrativa_id:
-            return autorizado.unidadAdministrativa.unidadAdministrativa
-        return None
+        user = User.objects.filter(email=obj.usuario).first()
+        return _resolver_unidad_administrativa(user) if user else None
 
     class Meta:
         model  = Bitacora
