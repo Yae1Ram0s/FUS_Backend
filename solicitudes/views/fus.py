@@ -3,8 +3,10 @@ import json
 import os
 import uuid
 
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.db.models import Q
+from django.http import FileResponse, Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
@@ -323,6 +325,27 @@ class FUSDetalleAuditoriaView(APIView):
             'evidencias': [{'nombreArchivo': e.nombreArchivo} for e in fus.evidencias.filter(activo=1)],
             'seguimientos': seguimientos,
         })
+
+
+# ── Descargar evidencia (archivo adjunto de un FUS) ───────────────────────────
+
+class DescargarEvidenciaView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, evidencia_id):
+        evidencia = get_object_or_404(Evidencia, pk=evidencia_id, activo=1)
+        fus = evidencia.idFus
+        rol = _rol(request.user)
+        if rol == 'ROL1' and fus.idSolicitanteInterno_id != request.user.id:
+            raise Http404
+        if rol == 'ROL2':
+            es_destinatario = Turnado.objects.filter(idFus=fus, idDestinatario=request.user, activo=1).exists()
+            if not es_destinatario:
+                raise Http404
+        ruta = os.path.join(settings.MEDIA_ROOT, evidencia.rutaArchivo)
+        if not os.path.exists(ruta):
+            raise Http404
+        return FileResponse(open(ruta, 'rb'), as_attachment=True, filename=evidencia.nombreArchivo)
 
 
 # ── Descargar FUS individual (PDF) ────────────────────────────────────────────

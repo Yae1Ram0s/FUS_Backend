@@ -27,11 +27,12 @@ if not SECRET_KEY:
 _hosts_raw = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1')
 ALLOWED_HOSTS = [h.strip() for h in _hosts_raw.split(',') if h.strip()]
 
-CSRF_TRUSTED_ORIGINS = [
-    'https://10.150.17.123:5173',
-    'http://localhost:5173',
-    'https://localhost:5173',
-]
+# En Railway hay que setear CSRF_TRUSTED_ORIGINS con el dominio real de producción
+# (p. ej. "https://scs-frontend.up.railway.app"), separado por comas si hay más de uno.
+CSRF_TRUSTED_ORIGINS = os.environ.get(
+    'CSRF_TRUSTED_ORIGINS',
+    'http://localhost:5173,https://localhost:5173'
+).split(',')
 
 # ── Aplicaciones ────────────────────────────────────────────────────────────
 INSTALLED_APPS = [

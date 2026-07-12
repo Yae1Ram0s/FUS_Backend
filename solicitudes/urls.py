@@ -18,6 +18,7 @@ from .views import (
     ExportarBitacoraExcelView,
     ExportarBitacoraPDFView,
     DescargarFUSPDFView,
+    DescargarEvidenciaView,
 )
 
 urlpatterns = [
@@ -52,4 +53,7 @@ urlpatterns = [
 
     # Descargar FUS individual (folio contiene slashes → path converter)
     path('fus/<path:folio>/pdf/',     DescargarFUSPDFView.as_view(),   name='fus-descargar-pdf'),
+
+    # Descargar evidencia
+    path('evidencias/<int:evidencia_id>/descargar/', DescargarEvidenciaView.as_view(), name='evidencia-descargar'),
 ]
