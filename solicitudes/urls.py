@@ -19,6 +19,7 @@ from .views import (
     ExportarBitacoraPDFView,
     DescargarFUSPDFView,
     DescargarEvidenciaView,
+    FUSTrazabilidadView,
 )
 
 urlpatterns = [
@@ -28,6 +29,7 @@ urlpatterns = [
     path('fus/<int:pk>/turnar/',               TurnarFUSView.as_view(),          name='fus-turnar'),
     path('fus/<int:pk>/actividad/',            FUSActividadView.as_view(),       name='fus-actividad'),
     path('fus/detalle-auditoria/<path:folio>/', FUSDetalleAuditoriaView.as_view(), name='fus-detalle-auditoria'),
+    path('fus/trazabilidad/<path:folio>/',      FUSTrazabilidadView.as_view(),     name='fus-trazabilidad'),
 
     # Turnados ROL2
     path('turnados/mis-turnados/',             MisTurnadosView.as_view(),        name='mis-turnados'),
