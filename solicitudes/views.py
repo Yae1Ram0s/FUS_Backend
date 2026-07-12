@@ -167,8 +167,18 @@ class FUSListCreateView(APIView):
                 Q(correoExterno__icontains=search) |
                 Q(idMedioRecepcion__nombreMedio__icontains=search) |
                 Q(idSolicitanteInterno__email__icontains=search) |
-                Q(idSolicitanteInterno__email__in=emails_nombre)
-            )
+                Q(idSolicitanteInterno__email__in=emails_nombre) |
+                Q(evidencias__nombreArchivo__icontains=search) |
+                Q(evidencias__comentarios__icontains=search) |
+                Q(turnados__solicitudTexto__icontains=search) |
+                Q(turnados__idMedio__nombreMedio__icontains=search) |
+                Q(turnados__idRemitente__email__icontains=search) |
+                Q(turnados__idRemitente__email__in=emails_nombre) |
+                Q(turnados__idDestinatario__email__icontains=search) |
+                Q(turnados__idDestinatario__email__in=emails_nombre) |
+                Q(turnados__seguimientos__descripcionActividad__icontains=search) |
+                Q(turnados__seguimientos__accionTexto__icontains=search)
+            ).distinct()
 
         qs = qs.order_by('-fechaRegistro')
 
@@ -464,8 +474,18 @@ class MisTurnadosView(APIView):
                 Q(idFus__correoExterno__icontains=search) |
                 Q(idFus__idMedioRecepcion__nombreMedio__icontains=search) |
                 Q(idFus__idSolicitanteInterno__email__icontains=search) |
-                Q(idFus__idSolicitanteInterno__email__in=emails_nombre)
-            )
+                Q(idFus__idSolicitanteInterno__email__in=emails_nombre) |
+                Q(idFus__evidencias__nombreArchivo__icontains=search) |
+                Q(idFus__evidencias__comentarios__icontains=search) |
+                Q(solicitudTexto__icontains=search) |
+                Q(idMedio__nombreMedio__icontains=search) |
+                Q(idRemitente__email__icontains=search) |
+                Q(idRemitente__email__in=emails_nombre) |
+                Q(idDestinatario__email__icontains=search) |
+                Q(idDestinatario__email__in=emails_nombre) |
+                Q(seguimientos__descripcionActividad__icontains=search) |
+                Q(seguimientos__accionTexto__icontains=search)
+            ).distinct()
 
         qs = qs.order_by('-fechaRegistro')
 
@@ -1102,8 +1122,18 @@ def _fus_queryset(request):
             Q(correoExterno__icontains=search) |
             Q(idMedioRecepcion__nombreMedio__icontains=search) |
             Q(idSolicitanteInterno__email__icontains=search) |
-            Q(idSolicitanteInterno__email__in=emails_nombre)
-        )
+            Q(idSolicitanteInterno__email__in=emails_nombre) |
+            Q(evidencias__nombreArchivo__icontains=search) |
+            Q(evidencias__comentarios__icontains=search) |
+            Q(turnados__solicitudTexto__icontains=search) |
+            Q(turnados__idMedio__nombreMedio__icontains=search) |
+            Q(turnados__idRemitente__email__icontains=search) |
+            Q(turnados__idRemitente__email__in=emails_nombre) |
+            Q(turnados__idDestinatario__email__icontains=search) |
+            Q(turnados__idDestinatario__email__in=emails_nombre) |
+            Q(turnados__seguimientos__descripcionActividad__icontains=search) |
+            Q(turnados__seguimientos__accionTexto__icontains=search)
+        ).distinct()
     return qs
 
 
