@@ -154,7 +154,9 @@ class FUSTrazabilidadView(APIView):
                 'detalle': 'Solicitud registrada',
             })
 
-        for t in turnados_qs.order_by('fechaHoraTurnado'):
+        turnados = list(turnados_qs.order_by('fechaHoraTurnado'))
+
+        for t in turnados:
             actor = resolver_nombre(t.idDestinatario) if t.idDestinatario else None
             if t.fechaHoraTurnado:
                 eventos.append({
@@ -177,7 +179,15 @@ class FUSTrazabilidadView(APIView):
 
         eventos.sort(key=lambda e: e['fecha'])
 
-        return Response({'folio': fus.folio, 'eventos': eventos})
+        # Estado actual — para el punto "en vivo" del timeline. ROL2 ve el
+        # estatus de su propio turnado (más reciente); ROL1 ve el estatus
+        # general del FUS.
+        if rol == 'ROL2':
+            estatus_actual = turnados[-1].estatusTitular_id if turnados else None
+        else:
+            estatus_actual = fus.estatusParticular_id
+
+        return Response({'folio': fus.folio, 'eventos': eventos, 'estatusActual': estatus_actual})
 
 
 # ── Turnados (ROL2) ──────────────────────────────────────────────────────────
