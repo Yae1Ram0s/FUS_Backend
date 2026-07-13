@@ -49,7 +49,7 @@ class FUSSerializer(serializers.ModelSerializer):
 class SeguimientoSerializer(serializers.ModelSerializer):
     class Meta:
         model  = Seguimiento
-        fields = ['id', 'fechaActividad', 'descripcionActividad', 'accionTexto']
+        fields = ['id', 'fechaActividad', 'descripcionActividad', 'accionTexto', 'fechaRegistro']
 
 
 

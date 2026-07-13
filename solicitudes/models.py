@@ -123,6 +123,7 @@ class Seguimiento(models.Model):
 
     class Meta:
         db_table = 'scs_tbl_respuestas'
+        ordering = ['fechaRegistro']
 
     idTurnado = models.ForeignKey(Turnado, on_delete=models.CASCADE, related_name='seguimientos')
     fechaActividad = models.DateField(null=True, blank=True)

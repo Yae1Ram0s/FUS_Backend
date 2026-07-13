@@ -314,7 +314,7 @@ class SeguimientoListCreateView(APIView):
         turnado = get_object_or_404(Turnado, pk=turnado_id, activo=1)
         if turnado.idDestinatario_id != request.user.id:
             return Response({'detail': 'No autorizado.'}, status=403)
-        qs      = Seguimiento.objects.filter(idTurnado=turnado, activo=1).order_by('fechaActividad')
+        qs      = Seguimiento.objects.filter(idTurnado=turnado, activo=1).order_by('fechaRegistro')
         return Response(SeguimientoSerializer(qs, many=True).data)
 
     def post(self, request, turnado_id):
