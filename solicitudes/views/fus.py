@@ -350,22 +350,282 @@ class DescargarEvidenciaView(APIView):
 
 # ── Descargar FUS individual (PDF) ────────────────────────────────────────────
 
+def generar_pdf_fus(fus, incluir_imagenes=False):
+    """Construye el PDF de un FUS (usado tanto para la descarga directa como
+    para el adjunto en las notificaciones por correo). Devuelve los bytes."""
+    from reportlab.lib.pagesizes import letter
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+        HRFlowable, Image as RLImage, PageBreak, KeepTogether,
+    )
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib import colors
+    from reportlab.lib.units import cm
+    import io
+
+    evidencias = [e for e in fus.evidencias.all() if e.activo]
+    turnados = [t for t in fus.turnados.all() if t.activo]
+
+    LETTERHEAD_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'membretada.png')
+
+    def _membrete(canvas_, doc_):
+        canvas_.saveState()
+        if os.path.exists(LETTERHEAD_PATH):
+            canvas_.drawImage(
+                LETTERHEAD_PATH, 0, 0,
+                width=letter[0], height=letter[1],
+                mask='auto', preserveAspectRatio=False,
+            )
+        canvas_.restoreState()
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter,
+                            leftMargin=2*cm, rightMargin=2*cm,
+                            topMargin=3.3*cm, bottomMargin=2.8*cm)
+    W = letter[0] - 4*cm  # ancho útil
+
+    VERDE    = colors.black
+    AMARILLO = colors.HexColor('#FFFF00')
+    CLARO    = colors.white
+    BORDE    = colors.black
+
+    styles = getSampleStyleSheet()
+
+    st_titulo = ParagraphStyle('titulo', fontName='Helvetica-Bold', fontSize=16,
+                               textColor=colors.black, spaceAfter=2)
+    st_folio  = ParagraphStyle('folio',  fontName='Helvetica-Bold', fontSize=11,
+                               textColor=colors.black, spaceBefore=6, spaceAfter=8)
+    st_sec    = ParagraphStyle('sec',    fontName='Helvetica-Bold', fontSize=9,
+                               textColor=colors.black, spaceAfter=0)
+    st_lbl    = ParagraphStyle('lbl',    fontName='Helvetica-Bold', fontSize=8,
+                               textColor=colors.black)
+    st_val    = ParagraphStyle('val',    fontName='Helvetica',      fontSize=8,
+                               textColor=colors.black, leading=11)
+
+    fmt = lambda d: d.strftime('%d/%m/%Y %H:%M') if d else '—'
+
+    sol = fus.idSolicitanteInterno
+    nombre_sol = resolver_nombre(sol) if sol else '—'
+
+    elements = []
+
+    # ── Encabezado ──
+    elements.append(Paragraph('FORMATO ÚNICO DE SOLICITUD', st_titulo))
+    elements.append(Paragraph(
+        f'Folio: {fus.folio} &nbsp;|&nbsp; Estatus: {fus.estatusParticular_id}',
+        st_folio,
+    ))
+    elements.append(HRFlowable(width='100%', thickness=2, color=VERDE, spaceAfter=10))
+
+    def seccion(titulo):
+        t = Table([[Paragraph(titulo, st_sec)]], colWidths=[W])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,-1), AMARILLO),
+            ('TOPPADDING',    (0,0), (-1,-1), 4),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+            ('LEFTPADDING',   (0,0), (-1,-1), 8),
+        ]))
+        return t
+
+    def fila(lbl, val):
+        return [Paragraph(lbl, st_lbl), Paragraph(str(val) if val else '—', st_val)]
+
+    # ── Datos generales ──
+    datos = [
+        fila('Fecha y hora',        fmt(fus.fechaHora)),
+        fila('Medio de recepción',  fus.idMedioRecepcion.nombreMedio if fus.idMedioRecepcion else '—'),
+        fila('Solicitante interno', nombre_sol),
+    ]
+    dt = Table(datos, colWidths=[4*cm, W - 4*cm])
+    dt.setStyle(TableStyle([
+        ('ROWBACKGROUNDS', (0,0), (-1,-1), [colors.white, CLARO]),
+        ('GRID',           (0,0), (-1,-1), 0.3, BORDE),
+        ('TOPPADDING',     (0,0), (-1,-1), 4),
+        ('BOTTOMPADDING',  (0,0), (-1,-1), 4),
+        ('LEFTPADDING',    (0,0), (-1,-1), 6),
+        ('RIGHTPADDING',   (0,0), (-1,-1), 6),
+    ]))
+    elements.append(KeepTogether([seccion('DATOS GENERALES'), Spacer(1, 4), dt]))
+    elements.append(Spacer(1, 8))
+
+    # ── Descripción ──
+    desc_data = [
+        fila('Descripción', fus.descripcion),
+        fila('Datos o antecedentes de contexto de la solicitud', fus.contexto or '—'),
+    ]
+    dt2 = Table(desc_data, colWidths=[4*cm, W - 4*cm])
+    dt2.setStyle(TableStyle([
+        ('ROWBACKGROUNDS', (0,0), (-1,-1), [colors.white, CLARO]),
+        ('GRID',           (0,0), (-1,-1), 0.3, BORDE),
+        ('TOPPADDING',     (0,0), (-1,-1), 6),
+        ('BOTTOMPADDING',  (0,0), (-1,-1), 6),
+        ('LEFTPADDING',    (0,0), (-1,-1), 6),
+        ('RIGHTPADDING',   (0,0), (-1,-1), 6),
+        ('VALIGN',         (0,0), (-1,-1), 'TOP'),
+    ]))
+    elements.append(KeepTogether([seccion('DESCRIPCIÓN DE LA SOLICITUD'), Spacer(1, 4), dt2]))
+    elements.append(Spacer(1, 8))
+
+    # ── Solicitante externo ──
+    if fus.nombreExterno or fus.correoExterno or fus.telefonoExterno:
+        ext_data = [
+            fila('Nombre',    fus.nombreExterno),
+            fila('Correo',    fus.correoExterno),
+            fila('Teléfono',  fus.telefonoExterno),
+        ]
+        dt3 = Table(ext_data, colWidths=[4*cm, W - 4*cm])
+        dt3.setStyle(TableStyle([
+            ('ROWBACKGROUNDS', (0,0), (-1,-1), [colors.white, CLARO]),
+            ('GRID',           (0,0), (-1,-1), 0.3, BORDE),
+            ('TOPPADDING',     (0,0), (-1,-1), 4),
+            ('BOTTOMPADDING',  (0,0), (-1,-1), 4),
+            ('LEFTPADDING',    (0,0), (-1,-1), 6),
+            ('RIGHTPADDING',   (0,0), (-1,-1), 6),
+        ]))
+        elements.append(KeepTogether([seccion('SOLICITANTE EXTERNO'), Spacer(1, 4), dt3]))
+        elements.append(Spacer(1, 8))
+
+    # ── Evidencia (solo nombres de archivo; las imágenes van al final si se solicitaron) ──
+    if evidencias:
+        ev_rows = []
+        for ev in evidencias:
+            texto = ev.nombreArchivo or '—'
+            if ev.comentarios:
+                texto += f' — {ev.comentarios}'
+            ev_rows.append([Paragraph(texto, st_val)])
+        evt = Table(ev_rows, colWidths=[W])
+        evt.setStyle(TableStyle([
+            ('ROWBACKGROUNDS', (0,0), (-1,-1), [colors.white, CLARO]),
+            ('GRID',           (0,0), (-1,-1), 0.3, BORDE),
+            ('TOPPADDING',     (0,0), (-1,-1), 5),
+            ('BOTTOMPADDING',  (0,0), (-1,-1), 5),
+            ('LEFTPADDING',    (0,0), (-1,-1), 8),
+        ]))
+        elements.append(KeepTogether([seccion('EVIDENCIA'), Spacer(1, 4), evt]))
+    else:
+        elements.append(KeepTogether([seccion('EVIDENCIA'), Spacer(1, 4), Paragraph('—', st_val)]))
+    elements.append(Spacer(1, 8))
+
+    # ── Prioridad ──
+    prioridad_bloque = [seccion('PRIORIDAD'), Spacer(1, 4), Paragraph(f'<b>{fus.prioridad or "—"}</b>', st_val)]
+    if fus.criterios:
+        prioridad_bloque.append(Spacer(1, 2))
+        for crit in [c.strip() for c in fus.criterios.split('|') if c.strip()]:
+            prioridad_bloque.append(Paragraph(f'• {crit}', st_val))
+    elements.append(KeepTogether(prioridad_bloque))
+    elements.append(Spacer(1, 8))
+
+    # ── Se turnó ──
+    if turnados:
+        for i, t in enumerate(turnados):
+            dest_nombre = resolver_nombre(t.idDestinatario) if t.idDestinatario else '—'
+            turno_data = [
+                fila('Nombre',             dest_nombre),
+                fila('Medio de envío',     t.idMedio.nombreMedio if t.idMedio else '—'),
+                fila('Fecha y hora',       fmt(t.fechaHoraTurnado)),
+                fila('Texto de la solicitud', t.solicitudTexto or '—'),
+            ]
+            tnt = Table(turno_data, colWidths=[4*cm, W - 4*cm])
+            tnt.setStyle(TableStyle([
+                ('ROWBACKGROUNDS', (0,0), (-1,-1), [colors.white, CLARO]),
+                ('GRID',           (0,0), (-1,-1), 0.3, BORDE),
+                ('TOPPADDING',     (0,0), (-1,-1), 4),
+                ('BOTTOMPADDING',  (0,0), (-1,-1), 4),
+                ('LEFTPADDING',    (0,0), (-1,-1), 6),
+                ('RIGHTPADDING',   (0,0), (-1,-1), 6),
+                ('VALIGN',         (0,0), (-1,-1), 'TOP'),
+            ]))
+            bloque = [seccion('SE TURNÓ'), Spacer(1, 4), tnt] if i == 0 else [tnt]
+            elements.append(KeepTogether(bloque))
+            elements.append(Spacer(1, 6))
+
+    # ── Respuesta y seguimiento ──
+    turnados_con_seguimiento = [
+        (t, [s for s in t.seguimientos.all() if s.activo]) for t in turnados
+    ]
+    turnados_con_seguimiento = [(t, segs) for t, segs in turnados_con_seguimiento if segs]
+
+    if turnados:
+        if turnados_con_seguimiento:
+            for i, (t, segs) in enumerate(turnados_con_seguimiento):
+                dest_nombre = resolver_nombre(t.idDestinatario) if t.idDestinatario else '—'
+                seg_rows = []
+                for s in segs:
+                    fecha_str = s.fechaActividad.strftime('%d/%m/%Y') if s.fechaActividad else '—'
+                    texto = s.descripcionActividad or '—'
+                    if s.accionTexto:
+                        texto += f'<br/>→ {s.accionTexto}'
+                    seg_rows.append([Paragraph(fecha_str, st_val), Paragraph(texto, st_val)])
+                segt = Table(seg_rows, colWidths=[3*cm, W - 3*cm])
+                segt.setStyle(TableStyle([
+                    ('ROWBACKGROUNDS', (0,0), (-1,-1), [colors.white, CLARO]),
+                    ('GRID',           (0,0), (-1,-1), 0.3, BORDE),
+                    ('TOPPADDING',     (0,0), (-1,-1), 4),
+                    ('BOTTOMPADDING',  (0,0), (-1,-1), 4),
+                    ('LEFTPADDING',    (0,0), (-1,-1), 6),
+                    ('RIGHTPADDING',   (0,0), (-1,-1), 6),
+                    ('VALIGN',         (0,0), (-1,-1), 'TOP'),
+                ]))
+                bloque = [Paragraph(dest_nombre, st_lbl), Spacer(1, 2), segt]
+                if i == 0:
+                    bloque = [seccion('RESPUESTA Y SEGUIMIENTO'), Spacer(1, 4)] + bloque
+                elements.append(KeepTogether(bloque))
+                elements.append(Spacer(1, 8))
+        else:
+            elements.append(KeepTogether([
+                seccion('RESPUESTA Y SEGUIMIENTO'), Spacer(1, 4),
+                Paragraph('Pendiente de respuesta del titular.', st_val),
+            ]))
+            elements.append(Spacer(1, 8))
+
+    # ── Pie ──
+    elements.append(Spacer(1, 12))
+    elements.append(HRFlowable(width='100%', thickness=0.5, color=BORDE))
+    pie = ParagraphStyle('pie', fontName='Helvetica', fontSize=7,
+                         textColor=colors.HexColor('#888888'), spaceBefore=4)
+    from datetime import datetime, timezone
+    now_str = datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M UTC')
+    elements.append(Paragraph(
+        f'Agencia Nacional de Aduanas de México — Sistema de Control de Solicitudes — Generado: {now_str}',
+        pie
+    ))
+
+    # ── Anexo de imágenes de evidencia (hoja nueva, al final) ──
+    if incluir_imagenes:
+        imagenes = [e for e in evidencias if (e.tipoMime or '').startswith('image/')]
+        rutas_validas = []
+        for ev in imagenes:
+            ruta_abs = os.path.join(settings.MEDIA_ROOT, ev.rutaArchivo or '')
+            if ev.rutaArchivo and os.path.exists(ruta_abs):
+                rutas_validas.append((ev, ruta_abs))
+
+        if rutas_validas:
+            elements.append(PageBreak())
+            elements.append(Paragraph('ANEXO — IMÁGENES DE EVIDENCIA', st_titulo))
+            elements.append(HRFlowable(width='100%', thickness=2, color=VERDE, spaceAfter=12))
+            max_w, max_h = W, 20*cm
+            for ev, ruta_abs in rutas_validas:
+                elements.append(Paragraph(ev.nombreArchivo or '—', st_lbl))
+                elements.append(Spacer(1, 4))
+                try:
+                    img = RLImage(ruta_abs)
+                    ratio = min(max_w / img.imageWidth, max_h / img.imageHeight, 1)
+                    img.drawWidth  = img.imageWidth * ratio
+                    img.drawHeight = img.imageHeight * ratio
+                    elements.append(img)
+                except Exception:
+                    elements.append(Paragraph('(No se pudo cargar la imagen)', st_val))
+                elements.append(Spacer(1, 16))
+
+    doc.build(elements, onFirstPage=_membrete, onLaterPages=_membrete)
+    return buf.getvalue()
+
+
 class DescargarFUSPDFView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, folio):
-        from django.conf import settings
         from django.http import HttpResponse
-        from reportlab.lib.pagesizes import letter
-        from reportlab.platypus import (
-            SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-            HRFlowable, Image as RLImage, PageBreak, KeepTogether,
-        )
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.lib import colors
-        from reportlab.lib.units import cm
-        import io
-
         try:
             fus = FUS.objects.select_related(
                 'idSolicitanteInterno', 'idMedioRecepcion', 'estatusParticular'
@@ -377,263 +637,8 @@ class DescargarFUSPDFView(APIView):
             return Response({'detail': 'FUS no encontrado.'}, status=404)
 
         incluir_imagenes = request.query_params.get('imagenes') == '1'
-
-        evidencias = [e for e in fus.evidencias.all() if e.activo]
-        turnados = [t for t in fus.turnados.all() if t.activo]
-
-        LETTERHEAD_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'membretada.png')
-
-        def _membrete(canvas_, doc_):
-            canvas_.saveState()
-            if os.path.exists(LETTERHEAD_PATH):
-                canvas_.drawImage(
-                    LETTERHEAD_PATH, 0, 0,
-                    width=letter[0], height=letter[1],
-                    mask='auto', preserveAspectRatio=False,
-                )
-            canvas_.restoreState()
-
-        buf = io.BytesIO()
-        doc = SimpleDocTemplate(buf, pagesize=letter,
-                                leftMargin=2*cm, rightMargin=2*cm,
-                                topMargin=3.3*cm, bottomMargin=2.8*cm)
-        W = letter[0] - 4*cm  # ancho útil
-
-        VERDE    = colors.black
-        AMARILLO = colors.HexColor('#FFFF00')
-        CLARO    = colors.white
-        BORDE    = colors.black
-
-        styles = getSampleStyleSheet()
-
-        st_titulo = ParagraphStyle('titulo', fontName='Helvetica-Bold', fontSize=16,
-                                   textColor=colors.black, spaceAfter=2)
-        st_folio  = ParagraphStyle('folio',  fontName='Helvetica-Bold', fontSize=11,
-                                   textColor=colors.black, spaceBefore=6, spaceAfter=8)
-        st_sec    = ParagraphStyle('sec',    fontName='Helvetica-Bold', fontSize=9,
-                                   textColor=colors.black, spaceAfter=0)
-        st_lbl    = ParagraphStyle('lbl',    fontName='Helvetica-Bold', fontSize=8,
-                                   textColor=colors.black)
-        st_val    = ParagraphStyle('val',    fontName='Helvetica',      fontSize=8,
-                                   textColor=colors.black, leading=11)
-
-        fmt = lambda d: d.strftime('%d/%m/%Y %H:%M') if d else '—'
-
-        sol = fus.idSolicitanteInterno
-        nombre_sol = resolver_nombre(sol) if sol else '—'
-
-        elements = []
-
-        # ── Encabezado ──
-        elements.append(Paragraph('FORMATO ÚNICO DE SOLICITUD', st_titulo))
-        elements.append(Paragraph(
-            f'Folio: {fus.folio} &nbsp;|&nbsp; Estatus: {fus.estatusParticular_id}',
-            st_folio,
-        ))
-        elements.append(HRFlowable(width='100%', thickness=2, color=VERDE, spaceAfter=10))
-
-        def seccion(titulo):
-            t = Table([[Paragraph(titulo, st_sec)]], colWidths=[W])
-            t.setStyle(TableStyle([
-                ('BACKGROUND', (0,0), (-1,-1), AMARILLO),
-                ('TOPPADDING',    (0,0), (-1,-1), 4),
-                ('BOTTOMPADDING', (0,0), (-1,-1), 4),
-                ('LEFTPADDING',   (0,0), (-1,-1), 8),
-            ]))
-            return t
-
-        def fila(lbl, val):
-            return [Paragraph(lbl, st_lbl), Paragraph(str(val) if val else '—', st_val)]
-
-        # ── Datos generales ──
-        datos = [
-            fila('Fecha y hora',        fmt(fus.fechaHora)),
-            fila('Medio de recepción',  fus.idMedioRecepcion.nombreMedio if fus.idMedioRecepcion else '—'),
-            fila('Solicitante interno', nombre_sol),
-        ]
-        dt = Table(datos, colWidths=[4*cm, W - 4*cm])
-        dt.setStyle(TableStyle([
-            ('ROWBACKGROUNDS', (0,0), (-1,-1), [colors.white, CLARO]),
-            ('GRID',           (0,0), (-1,-1), 0.3, BORDE),
-            ('TOPPADDING',     (0,0), (-1,-1), 4),
-            ('BOTTOMPADDING',  (0,0), (-1,-1), 4),
-            ('LEFTPADDING',    (0,0), (-1,-1), 6),
-            ('RIGHTPADDING',   (0,0), (-1,-1), 6),
-        ]))
-        elements.append(KeepTogether([seccion('DATOS GENERALES'), Spacer(1, 4), dt]))
-        elements.append(Spacer(1, 8))
-
-        # ── Descripción ──
-        desc_data = [
-            fila('Descripción', fus.descripcion),
-            fila('Datos o antecedentes de contexto de la solicitud', fus.contexto or '—'),
-        ]
-        dt2 = Table(desc_data, colWidths=[4*cm, W - 4*cm])
-        dt2.setStyle(TableStyle([
-            ('ROWBACKGROUNDS', (0,0), (-1,-1), [colors.white, CLARO]),
-            ('GRID',           (0,0), (-1,-1), 0.3, BORDE),
-            ('TOPPADDING',     (0,0), (-1,-1), 6),
-            ('BOTTOMPADDING',  (0,0), (-1,-1), 6),
-            ('LEFTPADDING',    (0,0), (-1,-1), 6),
-            ('RIGHTPADDING',   (0,0), (-1,-1), 6),
-            ('VALIGN',         (0,0), (-1,-1), 'TOP'),
-        ]))
-        elements.append(KeepTogether([seccion('DESCRIPCIÓN DE LA SOLICITUD'), Spacer(1, 4), dt2]))
-        elements.append(Spacer(1, 8))
-
-        # ── Solicitante externo ──
-        if fus.nombreExterno or fus.correoExterno or fus.telefonoExterno:
-            ext_data = [
-                fila('Nombre',    fus.nombreExterno),
-                fila('Correo',    fus.correoExterno),
-                fila('Teléfono',  fus.telefonoExterno),
-            ]
-            dt3 = Table(ext_data, colWidths=[4*cm, W - 4*cm])
-            dt3.setStyle(TableStyle([
-                ('ROWBACKGROUNDS', (0,0), (-1,-1), [colors.white, CLARO]),
-                ('GRID',           (0,0), (-1,-1), 0.3, BORDE),
-                ('TOPPADDING',     (0,0), (-1,-1), 4),
-                ('BOTTOMPADDING',  (0,0), (-1,-1), 4),
-                ('LEFTPADDING',    (0,0), (-1,-1), 6),
-                ('RIGHTPADDING',   (0,0), (-1,-1), 6),
-            ]))
-            elements.append(KeepTogether([seccion('SOLICITANTE EXTERNO'), Spacer(1, 4), dt3]))
-            elements.append(Spacer(1, 8))
-
-        # ── Evidencia (solo nombres de archivo; las imágenes van al final si se solicitaron) ──
-        if evidencias:
-            ev_rows = []
-            for ev in evidencias:
-                texto = ev.nombreArchivo or '—'
-                if ev.comentarios:
-                    texto += f' — {ev.comentarios}'
-                ev_rows.append([Paragraph(texto, st_val)])
-            evt = Table(ev_rows, colWidths=[W])
-            evt.setStyle(TableStyle([
-                ('ROWBACKGROUNDS', (0,0), (-1,-1), [colors.white, CLARO]),
-                ('GRID',           (0,0), (-1,-1), 0.3, BORDE),
-                ('TOPPADDING',     (0,0), (-1,-1), 5),
-                ('BOTTOMPADDING',  (0,0), (-1,-1), 5),
-                ('LEFTPADDING',    (0,0), (-1,-1), 8),
-            ]))
-            elements.append(KeepTogether([seccion('EVIDENCIA'), Spacer(1, 4), evt]))
-        else:
-            elements.append(KeepTogether([seccion('EVIDENCIA'), Spacer(1, 4), Paragraph('—', st_val)]))
-        elements.append(Spacer(1, 8))
-
-        # ── Prioridad ──
-        prioridad_bloque = [seccion('PRIORIDAD'), Spacer(1, 4), Paragraph(f'<b>{fus.prioridad or "—"}</b>', st_val)]
-        if fus.criterios:
-            prioridad_bloque.append(Spacer(1, 2))
-            for crit in [c.strip() for c in fus.criterios.split('|') if c.strip()]:
-                prioridad_bloque.append(Paragraph(f'• {crit}', st_val))
-        elements.append(KeepTogether(prioridad_bloque))
-        elements.append(Spacer(1, 8))
-
-        # ── Se turnó ──
-        if turnados:
-            for i, t in enumerate(turnados):
-                dest_nombre = resolver_nombre(t.idDestinatario) if t.idDestinatario else '—'
-                turno_data = [
-                    fila('Nombre',             dest_nombre),
-                    fila('Medio de envío',     t.idMedio.nombreMedio if t.idMedio else '—'),
-                    fila('Fecha y hora',       fmt(t.fechaHoraTurnado)),
-                    fila('Texto de la solicitud', t.solicitudTexto or '—'),
-                ]
-                tnt = Table(turno_data, colWidths=[4*cm, W - 4*cm])
-                tnt.setStyle(TableStyle([
-                    ('ROWBACKGROUNDS', (0,0), (-1,-1), [colors.white, CLARO]),
-                    ('GRID',           (0,0), (-1,-1), 0.3, BORDE),
-                    ('TOPPADDING',     (0,0), (-1,-1), 4),
-                    ('BOTTOMPADDING',  (0,0), (-1,-1), 4),
-                    ('LEFTPADDING',    (0,0), (-1,-1), 6),
-                    ('RIGHTPADDING',   (0,0), (-1,-1), 6),
-                    ('VALIGN',         (0,0), (-1,-1), 'TOP'),
-                ]))
-                bloque = [seccion('SE TURNÓ'), Spacer(1, 4), tnt] if i == 0 else [tnt]
-                elements.append(KeepTogether(bloque))
-                elements.append(Spacer(1, 6))
-
-        # ── Respuesta y seguimiento ──
-        turnados_con_seguimiento = [
-            (t, [s for s in t.seguimientos.all() if s.activo]) for t in turnados
-        ]
-        turnados_con_seguimiento = [(t, segs) for t, segs in turnados_con_seguimiento if segs]
-
-        if turnados:
-            if turnados_con_seguimiento:
-                for i, (t, segs) in enumerate(turnados_con_seguimiento):
-                    dest_nombre = resolver_nombre(t.idDestinatario) if t.idDestinatario else '—'
-                    seg_rows = []
-                    for s in segs:
-                        fecha_str = s.fechaActividad.strftime('%d/%m/%Y') if s.fechaActividad else '—'
-                        texto = s.descripcionActividad or '—'
-                        if s.accionTexto:
-                            texto += f'<br/>→ {s.accionTexto}'
-                        seg_rows.append([Paragraph(fecha_str, st_val), Paragraph(texto, st_val)])
-                    segt = Table(seg_rows, colWidths=[3*cm, W - 3*cm])
-                    segt.setStyle(TableStyle([
-                        ('ROWBACKGROUNDS', (0,0), (-1,-1), [colors.white, CLARO]),
-                        ('GRID',           (0,0), (-1,-1), 0.3, BORDE),
-                        ('TOPPADDING',     (0,0), (-1,-1), 4),
-                        ('BOTTOMPADDING',  (0,0), (-1,-1), 4),
-                        ('LEFTPADDING',    (0,0), (-1,-1), 6),
-                        ('RIGHTPADDING',   (0,0), (-1,-1), 6),
-                        ('VALIGN',         (0,0), (-1,-1), 'TOP'),
-                    ]))
-                    bloque = [Paragraph(dest_nombre, st_lbl), Spacer(1, 2), segt]
-                    if i == 0:
-                        bloque = [seccion('RESPUESTA Y SEGUIMIENTO'), Spacer(1, 4)] + bloque
-                    elements.append(KeepTogether(bloque))
-                    elements.append(Spacer(1, 8))
-            else:
-                elements.append(KeepTogether([
-                    seccion('RESPUESTA Y SEGUIMIENTO'), Spacer(1, 4),
-                    Paragraph('Pendiente de respuesta del titular.', st_val),
-                ]))
-                elements.append(Spacer(1, 8))
-
-        # ── Pie ──
-        elements.append(Spacer(1, 12))
-        elements.append(HRFlowable(width='100%', thickness=0.5, color=BORDE))
-        pie = ParagraphStyle('pie', fontName='Helvetica', fontSize=7,
-                             textColor=colors.HexColor('#888888'), spaceBefore=4)
-        from datetime import datetime, timezone
-        now_str = datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M UTC')
-        elements.append(Paragraph(
-            f'Agencia Nacional de Aduanas de México — Sistema de Control de Solicitudes — Generado: {now_str}',
-            pie
-        ))
-
-        # ── Anexo de imágenes de evidencia (hoja nueva, al final) ──
-        if incluir_imagenes:
-            imagenes = [e for e in evidencias if (e.tipoMime or '').startswith('image/')]
-            rutas_validas = []
-            for ev in imagenes:
-                ruta_abs = os.path.join(settings.MEDIA_ROOT, ev.rutaArchivo or '')
-                if ev.rutaArchivo and os.path.exists(ruta_abs):
-                    rutas_validas.append((ev, ruta_abs))
-
-            if rutas_validas:
-                elements.append(PageBreak())
-                elements.append(Paragraph('ANEXO — IMÁGENES DE EVIDENCIA', st_titulo))
-                elements.append(HRFlowable(width='100%', thickness=2, color=VERDE, spaceAfter=12))
-                max_w, max_h = W, 20*cm
-                for ev, ruta_abs in rutas_validas:
-                    elements.append(Paragraph(ev.nombreArchivo or '—', st_lbl))
-                    elements.append(Spacer(1, 4))
-                    try:
-                        img = RLImage(ruta_abs)
-                        ratio = min(max_w / img.imageWidth, max_h / img.imageHeight, 1)
-                        img.drawWidth  = img.imageWidth * ratio
-                        img.drawHeight = img.imageHeight * ratio
-                        elements.append(img)
-                    except Exception:
-                        elements.append(Paragraph('(No se pudo cargar la imagen)', st_val))
-                    elements.append(Spacer(1, 16))
-
-        doc.build(elements, onFirstPage=_membrete, onLaterPages=_membrete)
-        buf.seek(0)
-        resp = HttpResponse(buf, content_type='application/pdf')
-        resp['Content-Disposition'] = f'attachment; filename="FUS_{folio}.pdf"'
+        pdf_bytes = generar_pdf_fus(fus, incluir_imagenes=incluir_imagenes)
+        resp = HttpResponse(pdf_bytes, content_type='application/pdf')
+        nombre = fus.folio.replace('/', '-')
+        resp['Content-Disposition'] = f'attachment; filename="FUS_{nombre}.pdf"'
         return resp

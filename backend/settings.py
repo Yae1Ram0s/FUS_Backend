@@ -34,6 +34,10 @@ CSRF_TRUSTED_ORIGINS = os.environ.get(
     'http://localhost:5173,https://localhost:5173'
 ).split(',')
 
+# URL del frontend, usada para armar links absolutos en correos (p. ej. el
+# link al folio del FUS en las notificaciones).
+FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:5173')
+
 # ── Aplicaciones ────────────────────────────────────────────────────────────
 INSTALLED_APPS = [
     'daphne',
