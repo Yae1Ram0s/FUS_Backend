@@ -13,6 +13,7 @@ from catalogos.models import MedioRecepcion
 from ..models import FUS, Turnado, Seguimiento, Notificacion
 from ..serializers import TurnadoSerializer, TurnadoActividadSerializer, SeguimientoSerializer
 from ..utils import resolver_nombre
+from ..helpers import notificar_por_correo
 from .helpers import _rol, _log
 
 
@@ -92,6 +93,7 @@ class TurnarFUSView(APIView):
                 mensaje=f"{nombre_remitente} te ha turnado el FUS {fus.folio}.",
             )
             _push_notificacion(_notif)
+            notificar_por_correo(_notif)
 
         estado_ant = fus.estatusParticular_id
         fus.estatusParticular_id = 'Turnado'
@@ -297,6 +299,7 @@ class ConcluirTurnadoView(APIView):
                 mensaje=f"{nombre_concluye} ha concluido el FUS {fus.folio}.",
             )
             _push_notificacion(_notif)
+            notificar_por_correo(_notif)
 
             _log(usuario=user.email, rol=rol, accion='ASIGNACION_ESTADO',
                  ip=ip, folio=fus.folio,
@@ -366,6 +369,7 @@ class SeguimientoListCreateView(APIView):
                     mensaje=f"{nombre_titular} comenzó a atender el FUS {fus.folio}.",
                 )
                 _push_notificacion(_notif)
+                notificar_por_correo(_notif)
 
                 _log(usuario=user.email, rol=rol, accion='ASIGNACION_ESTADO',
                      ip=ip, folio=fus.folio,
@@ -383,6 +387,7 @@ class SeguimientoListCreateView(APIView):
                 mensaje=f"{nombre_titular} registró una nueva respuesta en el FUS {fus.folio}: \"{resumen}\"",
             )
             _push_notificacion(_notif)
+            notificar_por_correo(_notif)
 
         _log(usuario=user.email, rol=rol, accion='REGISTRO_RESPUESTA',
              ip=ip, folio=fus.folio)
