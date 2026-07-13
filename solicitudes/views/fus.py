@@ -261,6 +261,7 @@ class FUSDetailView(APIView):
         if 'nombreExterno' in data:       fus.nombreExterno = data.get('nombreExterno', '').strip() or None
         if 'telefonoExterno' in data:     fus.telefonoExterno = data.get('telefonoExterno', '').strip() or None
         if 'correoExterno' in data:       fus.correoExterno = data.get('correoExterno', '').strip() or None
+        if 'fechaLimite' in data:         fus.fechaLimite = data.get('fechaLimite') or None
         fus.idUsuarioModifica = user.id
         fus.save()
 
