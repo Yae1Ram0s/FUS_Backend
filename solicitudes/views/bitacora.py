@@ -87,7 +87,18 @@ def _aplicar_filtros_bitacora(qs, params, rol):
         emails = CorreoAutorizado.objects.filter(nombre__icontains=nombre).values_list('email', flat=True)
         qs = qs.filter(usuario__in=list(emails))
 
-    if estatus_fus:
+    if estatus_fus == 'Vencido':
+        folios = FUS.objects.filter(estatusParticular_id='Turnado', fechaLimite__lt=timezone.now()).values_list('folio', flat=True)
+        qs = qs.filter(fusFolio__in=list(folios))
+    elif estatus_fus == 'PorVencer':
+        ahora = timezone.now()
+        folios = FUS.objects.filter(
+            estatusParticular_id='Turnado',
+            fechaLimite__gte=ahora,
+            fechaLimite__lte=ahora + datetime.timedelta(hours=24),
+        ).values_list('folio', flat=True)
+        qs = qs.filter(fusFolio__in=list(folios))
+    elif estatus_fus:
         folios = FUS.objects.filter(estatusParticular_id=estatus_fus).values_list('folio', flat=True)
         qs = qs.filter(fusFolio__in=list(folios))
 

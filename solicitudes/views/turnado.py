@@ -207,7 +207,17 @@ class MisTurnadosView(APIView):
 
         estatus = request.query_params.get('estatusTitular')
         search  = request.query_params.get('search')
-        if estatus:
+        if estatus == 'Vencido':
+            qs = qs.filter(idFus__estatusParticular_id='Turnado', idFus__fechaLimite__lt=timezone.now())
+        elif estatus == 'PorVencer':
+            from datetime import timedelta
+            ahora = timezone.now()
+            qs = qs.filter(
+                idFus__estatusParticular_id='Turnado',
+                idFus__fechaLimite__gte=ahora,
+                idFus__fechaLimite__lte=ahora + timedelta(hours=24),
+            )
+        elif estatus:
             qs = qs.filter(estatusTitular_id=estatus)
         if search:
             emails_nombre = list(CorreoAutorizado.objects.filter(nombre__icontains=search).values_list('email', flat=True))
