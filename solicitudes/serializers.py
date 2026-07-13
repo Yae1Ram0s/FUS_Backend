@@ -35,6 +35,8 @@ class FUSSerializer(serializers.ModelSerializer):
     evidencias           = EvidenciaSerializer(many=True, read_only=True)
     # Devuelve la clave (string) del FK, igual que antes cuando era CharField
     estatusParticular    = serializers.CharField(source='estatusParticular_id', read_only=True)
+    slaVencido           = serializers.SerializerMethodField()
+    slaPorVencer         = serializers.SerializerMethodField()
 
     class Meta:
         model  = FUS
@@ -43,7 +45,22 @@ class FUSSerializer(serializers.ModelSerializer):
             'descripcion', 'contexto', 'idMedioRecepcion', 'medioEspecificacion',
             'prioridad', 'criterios', 'estatusParticular', 'fechaConclusion',
             'nombreExterno', 'telefonoExterno', 'correoExterno', 'evidencias',
+            'fechaLimite', 'slaVencido', 'slaPorVencer',
         ]
+
+    def get_slaVencido(self, obj):
+        from django.utils import timezone
+        if obj.estatusParticular_id != 'Turnado' or not obj.fechaLimite:
+            return False
+        return timezone.now() > obj.fechaLimite
+
+    def get_slaPorVencer(self, obj):
+        from datetime import timedelta
+        from django.utils import timezone
+        if obj.estatusParticular_id != 'Turnado' or not obj.fechaLimite:
+            return False
+        faltante = obj.fechaLimite - timezone.now()
+        return timedelta(0) < faltante <= timedelta(hours=24)
 
 
 class SeguimientoSerializer(serializers.ModelSerializer):

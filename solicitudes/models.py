@@ -48,6 +48,7 @@ class FUS(models.Model):
         default='Registrado',
     )
     fechaConclusion = models.DateTimeField(null=True, blank=True)
+    fechaLimite = models.DateTimeField(null=True, blank=True)
     fechaRegistro = models.DateTimeField(auto_now_add=True, null=True)
     fechaModificacion = models.DateTimeField(auto_now=True, null=True)
     idUsuarioRegistra = models.IntegerField(null=True, blank=True)
@@ -189,6 +190,7 @@ class Notificacion(models.Model):
         ('RESPUESTA', 'Nueva respuesta'),
         ('CAMBIO_ESTADO', 'Cambio de estado'),
         ('CONCLUIDO', 'FUS Concluido'),
+        ('SLA_POR_VENCER', 'SLA por vencer'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

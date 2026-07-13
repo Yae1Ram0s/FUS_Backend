@@ -203,6 +203,7 @@ class FUSListCreateView(APIView):
                     correoExterno=correo_ext,
                     estatusParticular_id='Registrado',
                     idUsuarioRegistra=user.id,
+                    fechaLimite=data.get('fechaLimite') or None,
                 )
                 break
             except IntegrityError:

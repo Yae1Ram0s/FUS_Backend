@@ -17,9 +17,10 @@ def _resolver_unidad_administrativa(user):
 
 
 TIPO_EVENTO_ASUNTO = {
-    'TURNADO':    'Nuevo FUS turnado — {folio}',
-    'RESPUESTA':  'Nueva respuesta registrada — {folio}',
-    'CONCLUIDO':  'FUS concluido — {folio}',
+    'TURNADO':         'Nuevo FUS turnado — {folio}',
+    'RESPUESTA':       'Nueva respuesta registrada — {folio}',
+    'CONCLUIDO':       'FUS concluido — {folio}',
+    'SLA_POR_VENCER':  'FUS por vencer — {folio}',
 }
 
 
