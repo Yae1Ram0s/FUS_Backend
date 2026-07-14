@@ -20,6 +20,8 @@ from .views import (
     DescargarFUSPDFView,
     DescargarEvidenciaView,
     FUSTrazabilidadView,
+    ActividadListCreateView,
+    ActividadDetailView,
 )
 
 urlpatterns = [
@@ -58,4 +60,8 @@ urlpatterns = [
 
     # Descargar evidencia
     path('evidencias/<int:evidencia_id>/descargar/', DescargarEvidenciaView.as_view(), name='evidencia-descargar'),
+
+    # Calendario de actividades
+    path('actividades/',            ActividadListCreateView.as_view(), name='actividad-list-create'),
+    path('actividades/<int:pk>/',   ActividadDetailView.as_view(),     name='actividad-detail'),
 ]

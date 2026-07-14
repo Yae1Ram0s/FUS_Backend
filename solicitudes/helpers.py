@@ -21,6 +21,7 @@ TIPO_EVENTO_ASUNTO = {
     'RESPUESTA':       'Nueva respuesta registrada — {folio}',
     'CONCLUIDO':       'FUS concluido — {folio}',
     'SLA_POR_VENCER':  'FUS por vencer — {folio}',
+    'ACTIVIDAD':       'Nueva actividad en tu calendario',
 }
 
 

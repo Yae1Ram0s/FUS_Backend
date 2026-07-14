@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth.models import User
 from catalogos.models import MedioRecepcion
-from .models import FUS, Evidencia, Turnado, Seguimiento, Notificacion, Bitacora
+from .models import FUS, Evidencia, Turnado, Seguimiento, Notificacion, Bitacora, Actividad
 from .utils import resolver_nombre
 from .helpers import _resolver_unidad_administrativa
 
@@ -109,6 +109,28 @@ class BitacoraSerializer(serializers.ModelSerializer):
         model  = Bitacora
         fields = ['id', 'fusFolio', 'fechaHora', 'usuario', 'nombre', 'rol', 'accion',
                   'estadoAnterior', 'estadoNuevo', 'ipCliente', 'observaciones', 'unidadAdministrativa']
+
+
+class ActividadSerializer(serializers.ModelSerializer):
+    fusFolio           = serializers.SerializerMethodField()
+    participantesInfo  = serializers.SerializerMethodField()
+
+    class Meta:
+        model  = Actividad
+        fields = [
+            'id', 'titulo', 'fecha', 'horaInicio', 'horaFin', 'descripcion', 'tipo',
+            'idCreador', 'idFusRelacionado', 'participantes', 'fechaCreacion',
+            'fusFolio', 'participantesInfo',
+        ]
+
+    def get_fusFolio(self, obj):
+        return obj.idFusRelacionado.folio if obj.idFusRelacionado else None
+
+    def get_participantesInfo(self, obj):
+        return [
+            {'id': u.id, 'nombre': resolver_nombre(u), 'email': u.email}
+            for u in obj.participantes.all()
+        ]
 
 
 class TurnadoActividadSerializer(serializers.ModelSerializer):

@@ -191,6 +191,7 @@ class Notificacion(models.Model):
         ('CAMBIO_ESTADO', 'Cambio de estado'),
         ('CONCLUIDO', 'FUS Concluido'),
         ('SLA_POR_VENCER', 'SLA por vencer'),
+        ('ACTIVIDAD', 'Actividad de calendario'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -206,3 +207,32 @@ class Notificacion(models.Model):
 
     def __str__(self):
         return f"{self.tipoEvento} → {self.idDestinatario} | {self.fusFolio}"
+
+
+class Actividad(models.Model):
+    """Eventos del calendario (reuniones, límites, actividad institucional)."""
+
+    class Meta:
+        db_table = 'scs_tbl_actividades'
+
+    TIPO_CHOICES = [
+        ('reunion', 'Reunión'),
+        ('fus', 'FUS vinculado'),
+        ('limite', 'Fecha límite'),
+        ('institucional', 'Institucional'),
+    ]
+
+    titulo = models.CharField(max_length=200)
+    fecha = models.DateField()
+    horaInicio = models.TimeField()
+    horaFin = models.TimeField()
+    descripcion = models.TextField(blank=True)
+    tipo = models.CharField(max_length=20, choices=TIPO_CHOICES, default='reunion')
+    idCreador = models.ForeignKey(User, on_delete=models.CASCADE, related_name='actividades_creadas')
+    idFusRelacionado = models.ForeignKey(FUS, on_delete=models.SET_NULL, null=True, blank=True)
+    participantes = models.ManyToManyField(User, related_name='actividades_invitado', blank=True)
+    fechaCreacion = models.DateTimeField(auto_now_add=True)
+    activo = models.SmallIntegerField(default=1)
+
+    def __str__(self):
+        return f"{self.titulo} — {self.fecha}"
