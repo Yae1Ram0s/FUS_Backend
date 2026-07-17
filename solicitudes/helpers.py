@@ -17,11 +17,15 @@ def _resolver_unidad_administrativa(user):
 
 
 TIPO_EVENTO_ASUNTO = {
-    'TURNADO':         'Nuevo FUS turnado — {folio}',
-    'RESPUESTA':       'Nueva respuesta registrada — {folio}',
-    'CONCLUIDO':       'FUS concluido — {folio}',
-    'SLA_POR_VENCER':  'FUS por vencer — {folio}',
-    'ACTIVIDAD':       'Nueva actividad en tu calendario',
+    'TURNADO':                 'Nuevo FUS turnado — {folio}',
+    'RESPUESTA':               'Nueva respuesta registrada — {folio}',
+    'CONCLUIDO':               'FUS concluido — {folio}',
+    'SLA_POR_VENCER':          'FUS por vencer — {folio}',
+    'ACTIVIDAD':               'Nueva actividad en tu calendario',
+    'ASIGNADO_COMISIONADO':    'Se te asignó un FUS — {folio}',
+    'SEGUIMIENTO_FINALIZADO':  'Seguimiento finalizado, pendiente de validación — {folio}',
+    'SOLICITUD_APROBADA':      'Tu seguimiento fue aprobado — {folio}',
+    'SOLICITUD_RECHAZADA':     'Tu seguimiento fue rechazado — {folio}',
 }
 
 
@@ -42,7 +46,12 @@ def notificar_por_correo(notificacion):
     asunto = asunto_tpl.format(folio=notificacion.fusFolio)
 
     rol = get_rol(dest)
-    ruta = '/rol1/consultar-fus' if rol == 'ROL1' else '/rol2/solicitudes'
+    if rol == 'ROL1':
+        ruta = '/rol1/consultar-fus'
+    elif rol == 'ROL2':
+        ruta = '/rol2/solicitudes'
+    else:
+        ruta = '/comisionado/mis-fus'
     query = urlencode({'modo': 'lista', 'folio': notificacion.fusFolio})
     url_fus = f'{settings.FRONTEND_URL}{ruta}?{query}'
 

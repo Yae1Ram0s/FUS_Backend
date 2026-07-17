@@ -49,6 +49,10 @@ class FUS(models.Model):
     )
     fechaConclusion = models.DateTimeField(null=True, blank=True)
     fechaLimite = models.DateTimeField(null=True, blank=True)
+    idComisionado = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.PROTECT, related_name='fus_comisionados'
+    )
+    fechaAsignacion = models.DateTimeField(null=True, blank=True)
     fechaRegistro = models.DateTimeField(auto_now_add=True, null=True)
     fechaModificacion = models.DateTimeField(auto_now=True, null=True)
     idUsuarioRegistra = models.IntegerField(null=True, blank=True)
@@ -163,6 +167,11 @@ class Bitacora(models.Model):
         ('CIERRE_SESION', 'Cierre de sesión'),
         ('RESTABLECER_CONTRASENA', 'Restablecimiento de contraseña'),
         ('ELIMINACION', 'Eliminación lógica'),
+        ('ASIGNACION_COMISIONADO', 'Asignación a comisionado'),
+        ('SEGUIMIENTO_COMISIONADO', 'Seguimiento de comisionado'),
+        ('FINALIZACION_SEGUIMIENTO', 'Finalización de seguimiento'),
+        ('APROBACION_FUS', 'Aprobación de FUS'),
+        ('RECHAZO_FUS', 'Rechazo de FUS'),
     ]
 
     fusFolio = models.CharField(max_length=100, null=True, blank=True)
@@ -192,6 +201,10 @@ class Notificacion(models.Model):
         ('CONCLUIDO', 'FUS Concluido'),
         ('SLA_POR_VENCER', 'SLA por vencer'),
         ('ACTIVIDAD', 'Actividad de calendario'),
+        ('ASIGNADO_COMISIONADO', 'FUS asignado a comisionado'),
+        ('SEGUIMIENTO_FINALIZADO', 'Seguimiento finalizado'),
+        ('SOLICITUD_APROBADA', 'Solicitud aprobada'),
+        ('SOLICITUD_RECHAZADA', 'Solicitud rechazada'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -199,7 +212,7 @@ class Notificacion(models.Model):
         User, on_delete=models.CASCADE, related_name='notificaciones'
     )
     fusFolio = models.CharField(max_length=100)
-    tipoEvento = models.CharField(max_length=20, choices=TIPO_CHOICES)
+    tipoEvento = models.CharField(max_length=25, choices=TIPO_CHOICES)
     mensaje = models.TextField()
     fechaGeneracion = models.DateTimeField(auto_now_add=True)
     leida = models.IntegerField(default=0)
@@ -236,3 +249,30 @@ class Actividad(models.Model):
 
     def __str__(self):
         return f"{self.titulo} — {self.fecha}"
+
+
+class SeguimientoRespuesta(models.Model):
+    """Bitácora de seguimiento del Comisionado sobre un FUS (acciones, avances,
+    finalización y rechazos) — feed cronológico independiente del Seguimiento
+    de ROL2 sobre Turnado."""
+
+    class Meta:
+        db_table = 'scs_tbl_seguimiento_comisionado'
+        ordering = ['fechaRegistro']
+
+    TIPO_CHOICES = [
+        ('accion_por_emprender', 'Acción por emprender'),
+        ('avance', 'Avance'),
+        ('finalizacion', 'Finalización'),
+        ('rechazo', 'Rechazo'),
+    ]
+
+    idFus = models.ForeignKey(FUS, on_delete=models.CASCADE, related_name='seguimientosComisionado')
+    idAutor = models.ForeignKey(User, on_delete=models.PROTECT, related_name='seguimientos_comisionado')
+    tipo = models.CharField(max_length=25, choices=TIPO_CHOICES)
+    contenido = models.TextField()
+    fechaRegistro = models.DateTimeField(auto_now_add=True)
+    activo = models.SmallIntegerField(default=1)
+
+    def __str__(self):
+        return f"{self.idFus.folio} — {self.tipo}"

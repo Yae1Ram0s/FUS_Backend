@@ -4,3 +4,4 @@ from .bitacora import *
 from .notificacion import *
 from .catalogo_export import *
 from .actividad import *
+from .comisionado import *

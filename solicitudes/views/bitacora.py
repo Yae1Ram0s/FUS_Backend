@@ -11,7 +11,7 @@ from rest_framework.permissions import IsAuthenticated
 from autenticacion.models import CorreoAutorizado
 from ..models import FUS, Bitacora
 from ..helpers import _resolver_unidad_administrativa
-from .helpers import _rol, ROL2_ACCIONES, _metadata_generacion
+from .helpers import _rol, ROL2_ACCIONES, COMISIONADO_ACCIONES, _metadata_generacion
 
 
 BITACORA_COLS_VALIDAS  = ['folio', 'nombre', 'usuario', 'fecha', 'accion', 'estado_ant', 'estado_nuevo', 'observaciones']
@@ -43,6 +43,10 @@ def _bitacora_base_qs(request):
     elif rol == 'ROL2':
         qs = Bitacora.objects.filter(
             usuario=request.user.email, accion__in=ROL2_ACCIONES
+        )
+    elif rol == 'COMISIONADO':
+        qs = Bitacora.objects.filter(
+            usuario=request.user.email, accion__in=COMISIONADO_ACCIONES
         )
     else:
         return Bitacora.objects.none()
@@ -178,6 +182,11 @@ class ExportarBitacoraExcelView(APIView):
             'INICIO_SESION': 'Inicio sesión', 'CIERRE_SESION': 'Cierre sesión',
             'RESTABLECER_CONTRASENA': 'Restablecer contraseña',
             'ELIMINACION': 'Eliminación',
+            'ASIGNACION_COMISIONADO': 'Asignación a comisionado',
+            'SEGUIMIENTO_COMISIONADO': 'Seguimiento de comisionado',
+            'FINALIZACION_SEGUIMIENTO': 'Finalización de seguimiento',
+            'APROBACION_FUS': 'Aprobación de FUS',
+            'RECHAZO_FUS': 'Rechazo de FUS',
         }
         nombres_map = dict(
             CorreoAutorizado.objects.filter(
@@ -306,6 +315,11 @@ class ExportarBitacoraPDFView(APIView):
             'INICIO_SESION': 'Inicio sesión', 'CIERRE_SESION': 'Cierre sesión',
             'RESTABLECER_CONTRASENA': 'Restablecer contraseña',
             'ELIMINACION': 'Eliminación',
+            'ASIGNACION_COMISIONADO': 'Asignación a comisionado',
+            'SEGUIMIENTO_COMISIONADO': 'Seguimiento de comisionado',
+            'FINALIZACION_SEGUIMIENTO': 'Finalización de seguimiento',
+            'APROBACION_FUS': 'Aprobación de FUS',
+            'RECHAZO_FUS': 'Rechazo de FUS',
         }
         nombres_map = dict(
             CorreoAutorizado.objects.filter(

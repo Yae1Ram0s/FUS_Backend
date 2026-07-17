@@ -440,7 +440,7 @@ class CorreoAutorizadoListView(APIView):
 
         if not email or not nombre:
             return Response({'detail': 'Email y nombre son requeridos.'}, status=400)
-        if rol not in ('ROL1', 'ROL2'):
+        if rol not in ('ROL1', 'ROL2', 'COMISIONADO'):
             return Response({'detail': 'Rol inválido.'}, status=400)
         if CorreoAutorizado.objects.filter(email=email).exists():
             return Response({'detail': 'Este correo ya está registrado.'}, status=400)
@@ -473,7 +473,7 @@ class CorreoAutorizadoDetailView(APIView):
 
         if 'activo' in request.data:
             c.activo = int(request.data['activo'])
-        if 'rol' in request.data and request.data['rol'] in ('ROL1', 'ROL2'):
+        if 'rol' in request.data and request.data['rol'] in ('ROL1', 'ROL2', 'COMISIONADO'):
             c.rol = request.data['rol']
         if 'nombre' in request.data:
             c.nombre = request.data['nombre'].strip()

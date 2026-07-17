@@ -10,7 +10,7 @@ from rest_framework.permissions import IsAuthenticated
 
 from autenticacion.models import CorreoAutorizado
 from catalogos.models import MedioRecepcion
-from ..models import FUS, Turnado, Seguimiento, Notificacion
+from ..models import FUS, Turnado, Seguimiento, Notificacion, Actividad
 from ..serializers import TurnadoSerializer, TurnadoActividadSerializer, SeguimientoSerializer
 from ..utils import resolver_nombre
 from ..helpers import notificar_por_correo
@@ -86,6 +86,19 @@ class TurnarFUSView(APIView):
                 fechaHoraTurnado=now,
                 idUsuarioRegistra=user.id,
             )
+            if fus.fechaLimite:
+                actividad_limite, _creada = Actividad.objects.get_or_create(
+                    idFusRelacionado=fus, tipo='limite', activo=1,
+                    defaults={
+                        'titulo': f"Vence FUS: {fus.folio}",
+                        'fecha': fus.fechaLimite.date(),
+                        'horaInicio': fus.fechaLimite.time(),
+                        'horaFin': fus.fechaLimite.time(),
+                        'idCreador': user,
+                    },
+                )
+                actividad_limite.participantes.add(dest_user)
+
             _notif = Notificacion.objects.create(
                 idDestinatario=dest_user,
                 fusFolio=fus.folio,

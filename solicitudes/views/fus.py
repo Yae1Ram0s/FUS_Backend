@@ -18,7 +18,7 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 
 from autenticacion.models import CorreoAutorizado
 from catalogos.models import MedioRecepcion
-from ..models import FUS, Evidencia, Turnado
+from ..models import FUS, Evidencia, Turnado, Actividad
 from ..serializers import FUSSerializer, TurnadoActividadSerializer
 from ..utils import resolver_nombre
 from .helpers import _rol, _log, _ROL_FOLIO
@@ -217,10 +217,24 @@ class FUSListCreateView(APIView):
                     raise
                 continue
 
+        fus.refresh_from_db()
+
         err_resp = _guardar_evidencias(fus, request, user)
         if err_resp:
             fus.delete()
             return err_resp
+
+        if fus.fechaLimite:
+            Actividad.objects.create(
+                titulo=f"Vence FUS: {fus.folio}",
+                fecha=fus.fechaLimite.date(),
+                horaInicio=fus.fechaLimite.time(),
+                horaFin=fus.fechaLimite.time(),
+                tipo='limite',
+                idCreador=user,
+                idFusRelacionado=fus,
+                activo=1,
+            )
 
         _log(usuario=user.email, rol=rol, accion='REGISTRO_FUS',
              ip=ip, folio=folio, estado_nuevo='Registrado')

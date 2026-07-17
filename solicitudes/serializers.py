@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth.models import User
 from catalogos.models import MedioRecepcion
-from .models import FUS, Evidencia, Turnado, Seguimiento, Notificacion, Bitacora, Actividad
+from .models import FUS, Evidencia, Turnado, Seguimiento, Notificacion, Bitacora, Actividad, SeguimientoRespuesta
 from .utils import resolver_nombre
 from .helpers import _resolver_unidad_administrativa
 
@@ -32,6 +32,7 @@ class EvidenciaSerializer(serializers.ModelSerializer):
 class FUSSerializer(serializers.ModelSerializer):
     idSolicitanteInterno = UserMiniSerializer(read_only=True)
     idMedioRecepcion     = MedioMiniSerializer(read_only=True)
+    idComisionado        = UserMiniSerializer(read_only=True)
     evidencias           = EvidenciaSerializer(many=True, read_only=True)
     # Devuelve la clave (string) del FK, igual que antes cuando era CharField
     estatusParticular    = serializers.CharField(source='estatusParticular_id', read_only=True)
@@ -46,6 +47,7 @@ class FUSSerializer(serializers.ModelSerializer):
             'prioridad', 'criterios', 'estatusParticular', 'fechaConclusion',
             'nombreExterno', 'telefonoExterno', 'correoExterno', 'evidencias',
             'fechaLimite', 'slaVencido', 'slaPorVencer',
+            'idComisionado', 'fechaAsignacion',
         ]
 
     def get_slaVencido(self, obj):
@@ -67,6 +69,20 @@ class SeguimientoSerializer(serializers.ModelSerializer):
     class Meta:
         model  = Seguimiento
         fields = ['id', 'fechaActividad', 'descripcionActividad', 'accionTexto', 'fechaRegistro']
+
+
+class SeguimientoRespuestaSerializer(serializers.ModelSerializer):
+    idAutor = UserMiniSerializer(read_only=True)
+
+    class Meta:
+        model  = SeguimientoRespuesta
+        fields = ['id', 'idFus', 'idAutor', 'tipo', 'contenido', 'fechaRegistro']
+        read_only_fields = ['idFus', 'idAutor', 'fechaRegistro']
+
+    def validate_contenido(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError('El contenido no puede estar vacío.')
+        return value
 
 
 

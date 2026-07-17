@@ -22,6 +22,13 @@ from .views import (
     FUSTrazabilidadView,
     ActividadListCreateView,
     ActividadDetailView,
+    FUSComisionadosDisponiblesView,
+    ComisionarFUSView,
+    MisFUSComisionadosView,
+    SeguimientoComisionadoListCreateView,
+    FinalizarSeguimientoView,
+    AprobarFUSView,
+    RechazarFUSView,
 )
 
 urlpatterns = [
@@ -64,4 +71,13 @@ urlpatterns = [
     # Calendario de actividades
     path('actividades/',            ActividadListCreateView.as_view(), name='actividad-list-create'),
     path('actividades/<int:pk>/',   ActividadDetailView.as_view(),     name='actividad-detail'),
+
+    # Comisionado (mis-comisionados debe ir antes que fus/<int:pk>/ para no ambigüedad de lectura)
+    path('fus/mis-comisionados/',                  MisFUSComisionadosView.as_view(),          name='fus-mis-comisionados'),
+    path('fus/<int:pk>/comisionados-disponibles/', FUSComisionadosDisponiblesView.as_view(),  name='fus-comisionados-disponibles'),
+    path('fus/<int:pk>/comisionar/',               ComisionarFUSView.as_view(),               name='fus-comisionar'),
+    path('fus/<int:pk>/seguimiento/',               SeguimientoComisionadoListCreateView.as_view(), name='fus-seguimiento-comisionado'),
+    path('fus/<int:pk>/finalizar-seguimiento/',    FinalizarSeguimientoView.as_view(),        name='fus-finalizar-seguimiento'),
+    path('fus/<int:pk>/aprobar/',                  AprobarFUSView.as_view(),                  name='fus-aprobar'),
+    path('fus/<int:pk>/rechazar/',                 RechazarFUSView.as_view(),                 name='fus-rechazar'),
 ]
