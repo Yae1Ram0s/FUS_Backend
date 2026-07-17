@@ -30,11 +30,12 @@ def _titulares_area(unidad_id):
 
 
 class FUSComisionadosDisponiblesView(APIView):
-    """GET — usuarios rol=COMISIONADO de la misma unidad administrativa que el Titular autenticado."""
+    """GET — usuarios rol=COMISIONADO de la misma unidad administrativa que el
+    usuario autenticado (ROL1 o ROL2, ambos con facultad de comisionar)."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk):
-        if _rol(request.user) != 'ROL2':
+        if _rol(request.user) not in ('ROL1', 'ROL2'):
             return Response({'detail': 'No autorizado.'}, status=403)
 
         get_object_or_404(FUS, pk=pk, activo=1)
@@ -66,18 +67,23 @@ class ComisionarFUSView(APIView):
 
     def post(self, request, pk):
         user = request.user
-        if _rol(user) != 'ROL2':
+        rol  = _rol(user)
+        if rol not in ('ROL1', 'ROL2'):
             return Response({'detail': 'No autorizado.'}, status=403)
 
         fus = get_object_or_404(FUS, pk=pk, activo=1)
+
+        # ROL1 comisiona directamente desde "Registrado" (antes de turnar); ROL2
+        # solo ve el FUS una vez que se lo turnan, así que su vía sigue siendo "Turnado".
+        estatus_requerido = 'Registrado' if rol == 'ROL1' else 'Turnado'
 
         if fus.estatusParticular_id == 'Concluido':
             return Response(
                 {'detail': 'La solicitud ya fue concluida y no puede asignarse a un comisionado.'}, status=400
             )
-        if fus.estatusParticular_id != 'Turnado':
+        if fus.estatusParticular_id != estatus_requerido:
             return Response(
-                {'detail': 'La solicitud debe estar en estatus "Turnado" para asignar un comisionado.'}, status=400
+                {'detail': f'La solicitud debe estar en estatus "{estatus_requerido}" para asignar un comisionado.'}, status=400
             )
 
         comisionado_id = request.data.get('comisionado_id')
@@ -105,13 +111,13 @@ class ComisionarFUSView(APIView):
         _log(usuario=user.email, rol=rol, accion='ASIGNACION_COMISIONADO',
              ip=ip, folio=fus.folio, estado_ant=est_ant, estado_nuevo='En_seguimiento')
 
-        titular_auth = CorreoAutorizado.objects.filter(email=user.email, activo=1).first()
-        nombre_titular = titular_auth.nombre if titular_auth else (user.first_name or user.email)
+        asignador_auth = CorreoAutorizado.objects.filter(email=user.email, activo=1).first()
+        nombre_asignador = asignador_auth.nombre if asignador_auth else (user.first_name or user.email)
         notif = Notificacion.objects.create(
             idDestinatario=comisionado,
             fusFolio=fus.folio,
             tipoEvento='ASIGNADO_COMISIONADO',
-            mensaje=f"{nombre_titular} te asignó el FUS {fus.folio} para su seguimiento.",
+            mensaje=f"{nombre_asignador} te asignó el FUS {fus.folio} para su seguimiento.",
         )
         _push_notificacion(notif)
         notificar_por_correo(notif)
@@ -155,9 +161,9 @@ class SeguimientoComisionadoListCreateView(APIView):
         user = request.user
         rol  = _rol(user)
 
-        es_titular_area = rol == 'ROL2' and fus.idComisionado_id and _unidad_id(user) == _unidad_id(fus.idComisionado)
+        tiene_facultad_area = rol in ('ROL1', 'ROL2') and fus.idComisionado_id and _unidad_id(user) == _unidad_id(fus.idComisionado)
         es_comisionado_asignado = rol == 'COMISIONADO' and fus.idComisionado_id == user.id
-        if not (es_titular_area or es_comisionado_asignado):
+        if not (tiene_facultad_area or es_comisionado_asignado):
             return Response({'detail': 'No autorizado.'}, status=403)
 
         qs = SeguimientoRespuesta.objects.filter(idFus=fus, activo=1).select_related('idAutor').order_by('fechaRegistro')
@@ -236,10 +242,12 @@ class AprobarFUSView(APIView):
 
     def post(self, request, pk):
         user = request.user
-        if _rol(user) != 'ROL2':
+        if _rol(user) not in ('ROL1', 'ROL2'):
             return Response({'detail': 'No autorizado.'}, status=403)
 
         fus = get_object_or_404(FUS, pk=pk, activo=1)
+        if not fus.idComisionado_id or _unidad_id(fus.idComisionado) != _unidad_id(user):
+            return Response({'detail': 'No autorizado.'}, status=403)
         if fus.estatusParticular_id != 'Pendiente_validacion':
             return Response(
                 {'detail': 'La solicitud debe estar pendiente de validación para poder aprobarla.'}, status=400
@@ -274,10 +282,12 @@ class RechazarFUSView(APIView):
 
     def post(self, request, pk):
         user = request.user
-        if _rol(user) != 'ROL2':
+        if _rol(user) not in ('ROL1', 'ROL2'):
             return Response({'detail': 'No autorizado.'}, status=403)
 
         fus = get_object_or_404(FUS, pk=pk, activo=1)
+        if not fus.idComisionado_id or _unidad_id(fus.idComisionado) != _unidad_id(user):
+            return Response({'detail': 'No autorizado.'}, status=403)
         if fus.estatusParticular_id != 'Pendiente_validacion':
             return Response(
                 {'detail': 'La solicitud debe estar pendiente de validación para poder rechazarla.'}, status=400
