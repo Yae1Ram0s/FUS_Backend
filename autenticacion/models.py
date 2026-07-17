@@ -11,11 +11,12 @@ class CorreoAutorizado(models.Model):
         ('ROL1', 'Particular del Titular'),
         ('ROL2', 'Titular / Enlace Estratégico'),
         ('COMISIONADO', 'Comisionado'),
+        ('EQUIPO_PARTICULAR', 'Equipo del Particular'),
     ]
 
     email = models.EmailField(unique=True)
     nombre = models.CharField(max_length=255)
-    rol = models.CharField(max_length=15, choices=ROL_CHOICES)
+    rol = models.CharField(max_length=20, choices=ROL_CHOICES)
     unidadAdministrativa = models.ForeignKey(
         'catalogos.UnidadAdministrativa', null=True, blank=True,
         on_delete=models.SET_NULL, db_constraint=False,

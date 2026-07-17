@@ -440,10 +440,14 @@ class CorreoAutorizadoListView(APIView):
 
         if not email or not nombre:
             return Response({'detail': 'Email y nombre son requeridos.'}, status=400)
-        if rol not in ('ROL1', 'ROL2', 'COMISIONADO'):
+        if rol not in ('ROL1', 'ROL2', 'COMISIONADO', 'EQUIPO_PARTICULAR'):
             return Response({'detail': 'Rol inválido.'}, status=400)
         if rol == 'COMISIONADO' and not unidad_id:
             return Response({'detail': 'Selecciona la dirección a la que quedará vinculado el comisionado.'}, status=400)
+        if rol == 'EQUIPO_PARTICULAR':
+            # La dirección no es libre: se hereda del ROL1 que da de alta al asistente.
+            creador = CorreoAutorizado.objects.filter(email=request.user.email, activo=1).first()
+            unidad_id = creador.unidadAdministrativa_id if creador else None
         if CorreoAutorizado.objects.filter(email=email).exists():
             return Response({'detail': 'Este correo ya está registrado.'}, status=400)
         if unidad_id and not UnidadAdministrativa.objects.filter(pk=unidad_id, activo=1).exists():
@@ -475,7 +479,7 @@ class CorreoAutorizadoDetailView(APIView):
 
         if 'activo' in request.data:
             c.activo = int(request.data['activo'])
-        if 'rol' in request.data and request.data['rol'] in ('ROL1', 'ROL2', 'COMISIONADO'):
+        if 'rol' in request.data and request.data['rol'] in ('ROL1', 'ROL2', 'COMISIONADO', 'EQUIPO_PARTICULAR'):
             c.rol = request.data['rol']
         if 'nombre' in request.data:
             c.nombre = request.data['nombre'].strip()

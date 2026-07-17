@@ -21,7 +21,7 @@ from catalogos.models import MedioRecepcion
 from ..models import FUS, Evidencia, Turnado, Actividad
 from ..serializers import FUSSerializer, TurnadoActividadSerializer
 from ..utils import resolver_nombre
-from .helpers import _rol, _log, _ROL_FOLIO
+from .helpers import _rol, _log, _ROL_FOLIO, ROLES_PARTICULAR, _propietario_fus
 
 ALLOWED_MIME_TYPES = {
     'application/pdf',
@@ -113,12 +113,17 @@ class FUSListCreateView(APIView):
     parser_classes     = [MultiPartParser, FormParser, JSONParser]
 
     def get(self, request):
-        if _rol(request.user) != 'ROL1':
+        rol = _rol(request.user)
+        if rol not in ROLES_PARTICULAR:
             return Response({'detail': 'No autorizado.'}, status=403)
 
         qs = FUS.objects.filter(activo=1).select_related(
             'idSolicitanteInterno', 'idMedioRecepcion'
         ).prefetch_related('evidencias')
+
+        if rol == 'EQUIPO_PARTICULAR':
+            propietario = _propietario_fus(request.user)
+            qs = qs.filter(idSolicitanteInterno=propietario) if propietario else qs.none()
 
         estatus = request.query_params.get('estatusParticular')
         search  = request.query_params.get('search')
@@ -173,7 +178,11 @@ class FUSListCreateView(APIView):
     def post(self, request):
         user  = request.user
         rol   = _rol(user)
-        if rol != 'ROL1':
+        if rol not in ROLES_PARTICULAR:
+            return Response({'detail': 'No autorizado.'}, status=403)
+
+        propietario = _propietario_fus(user)
+        if not propietario:
             return Response({'detail': 'No autorizado.'}, status=403)
 
         data  = request.data
@@ -196,7 +205,7 @@ class FUSListCreateView(APIView):
             try:
                 fus = FUS.objects.create(
                     folio=folio,
-                    idSolicitanteInterno=user,
+                    idSolicitanteInterno=propietario,
                     fechaHora=now,
                     descripcion=data.get('descripcion', ''),
                     contexto=data.get('contexto', ''),
@@ -248,21 +257,29 @@ class FUSDetailView(APIView):
     parser_classes     = [MultiPartParser, FormParser, JSONParser]
 
     def get(self, request, pk):
-        if _rol(request.user) != 'ROL1':
+        rol = _rol(request.user)
+        if rol not in ROLES_PARTICULAR:
+            return Response({'detail': 'No autorizado.'}, status=403)
+        propietario = _propietario_fus(request.user)
+        if not propietario:
             return Response({'detail': 'No autorizado.'}, status=403)
         fus = get_object_or_404(
             FUS.objects.select_related('idSolicitanteInterno', 'idMedioRecepcion').prefetch_related('evidencias'),
-            pk=pk, activo=1, idSolicitanteInterno=request.user,
+            pk=pk, activo=1, idSolicitanteInterno=propietario,
         )
         return Response(FUSSerializer(fus).data)
 
     def patch(self, request, pk):
         user = request.user
         rol  = _rol(user)
-        if rol != 'ROL1':
+        if rol not in ROLES_PARTICULAR:
             return Response({'detail': 'No autorizado.'}, status=403)
 
-        fus = get_object_or_404(FUS, pk=pk, activo=1, idSolicitanteInterno=user)
+        propietario = _propietario_fus(user)
+        if not propietario:
+            return Response({'detail': 'No autorizado.'}, status=403)
+
+        fus = get_object_or_404(FUS, pk=pk, activo=1, idSolicitanteInterno=propietario)
         if fus.estatusParticular_id != 'Registrado':
             return Response(
                 {'detail': 'Solo se puede editar una solicitud en estatus "Registrado".'},
@@ -300,12 +317,20 @@ class FUSDetalleAuditoriaView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, folio):
-        if _rol(request.user) != 'ROL1':
+        rol = _rol(request.user)
+        if rol not in ROLES_PARTICULAR:
             return Response({'detail': 'No autorizado.'}, status=403)
+
+        filtros = {'folio': folio, 'activo': 1}
+        if rol == 'EQUIPO_PARTICULAR':
+            propietario = _propietario_fus(request.user)
+            if not propietario:
+                return Response({'detail': 'No autorizado.'}, status=403)
+            filtros['idSolicitanteInterno'] = propietario
 
         fus = get_object_or_404(
             FUS.objects.select_related('idSolicitanteInterno', 'idMedioRecepcion', 'estatusParticular'),
-            folio=folio, activo=1,
+            **filtros,
         )
 
         turnados = Turnado.objects.filter(idFus=fus).select_related(
@@ -358,8 +383,10 @@ class DescargarEvidenciaView(APIView):
         evidencia = get_object_or_404(Evidencia, pk=evidencia_id, activo=1)
         fus = evidencia.idFus
         rol = _rol(request.user)
-        if rol == 'ROL1' and fus.idSolicitanteInterno_id != request.user.id:
-            raise Http404
+        if rol in ROLES_PARTICULAR:
+            propietario = _propietario_fus(request.user)
+            if not propietario or fus.idSolicitanteInterno_id != propietario.id:
+                raise Http404
         if rol == 'ROL2':
             es_destinatario = Turnado.objects.filter(idFus=fus, idDestinatario=request.user, activo=1).exists()
             if not es_destinatario:

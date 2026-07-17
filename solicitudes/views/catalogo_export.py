@@ -6,17 +6,21 @@ from rest_framework.exceptions import PermissionDenied
 
 from autenticacion.models import CorreoAutorizado
 from ..models import FUS
-from .helpers import _rol
+from .helpers import _rol, ROLES_PARTICULAR, _propietario_fus
 
 
 # ── Exportar FUS ──────────────────────────────────────────────────────────────
 
 def _fus_queryset(request):
-    if _rol(request.user) != 'ROL1':
+    rol = _rol(request.user)
+    if rol not in ROLES_PARTICULAR:
         raise PermissionDenied('No autorizado.')
     qs = FUS.objects.filter(activo=1).select_related(
         'idSolicitanteInterno', 'idMedioRecepcion'
     ).order_by('-fechaRegistro')
+    if rol == 'EQUIPO_PARTICULAR':
+        propietario = _propietario_fus(request.user)
+        qs = qs.filter(idSolicitanteInterno=propietario) if propietario else qs.none()
     estatus = request.query_params.get('estatusParticular')
     search  = request.query_params.get('search')
     if estatus: qs = qs.filter(estatusParticular_id=estatus)

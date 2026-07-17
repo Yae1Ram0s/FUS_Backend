@@ -11,7 +11,7 @@ from rest_framework.permissions import IsAuthenticated
 from autenticacion.models import CorreoAutorizado
 from ..models import FUS, Bitacora
 from ..helpers import _resolver_unidad_administrativa
-from .helpers import _rol, ROL2_ACCIONES, COMISIONADO_ACCIONES, _metadata_generacion
+from .helpers import _rol, ROL2_ACCIONES, COMISIONADO_ACCIONES, _metadata_generacion, _propietario_fus
 
 
 BITACORA_COLS_VALIDAS  = ['folio', 'nombre', 'usuario', 'fecha', 'accion', 'estado_ant', 'estado_nuevo', 'observaciones']
@@ -48,6 +48,12 @@ def _bitacora_base_qs(request):
         qs = Bitacora.objects.filter(
             usuario=request.user.email, accion__in=COMISIONADO_ACCIONES
         )
+    elif rol == 'EQUIPO_PARTICULAR':
+        propietario = _propietario_fus(request.user)
+        if not propietario:
+            return Bitacora.objects.none()
+        folios = FUS.objects.filter(idSolicitanteInterno=propietario).values_list('folio', flat=True)
+        qs = Bitacora.objects.filter(fusFolio__in=list(folios))
     else:
         return Bitacora.objects.none()
     return qs.exclude(fusFolio__isnull=True).exclude(fusFolio='')

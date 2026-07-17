@@ -14,7 +14,7 @@ from ..models import FUS, Turnado, Seguimiento, Notificacion, Actividad
 from ..serializers import TurnadoSerializer, TurnadoActividadSerializer, SeguimientoSerializer
 from ..utils import resolver_nombre
 from ..helpers import notificar_por_correo
-from .helpers import _rol, _log
+from .helpers import _rol, _log, ROLES_PARTICULAR, _propietario_fus
 
 
 def _push_notificacion(notif):
@@ -44,10 +44,14 @@ class TurnarFUSView(APIView):
     def post(self, request, pk):
         user = request.user
         rol  = _rol(user)
-        if rol != 'ROL1':
+        if rol not in ROLES_PARTICULAR:
             return Response({'detail': 'No autorizado.'}, status=403)
 
-        fus           = get_object_or_404(FUS, pk=pk, activo=1, idSolicitanteInterno=user)
+        propietario = _propietario_fus(user)
+        if not propietario:
+            return Response({'detail': 'No autorizado.'}, status=403)
+
+        fus           = get_object_or_404(FUS, pk=pk, activo=1, idSolicitanteInterno=propietario)
         ip            = request.META.get('REMOTE_ADDR')
         destinatarios = request.data.get('destinatarios', [])
         solicitud_txt = request.data.get('solicitudTexto', '')
@@ -125,10 +129,14 @@ class FUSActividadView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk):
-        if _rol(request.user) != 'ROL1':
+        if _rol(request.user) not in ROLES_PARTICULAR:
             return Response({'detail': 'No autorizado.'}, status=403)
 
-        fus = get_object_or_404(FUS, pk=pk, activo=1, idSolicitanteInterno=request.user)
+        propietario = _propietario_fus(request.user)
+        if not propietario:
+            return Response({'detail': 'No autorizado.'}, status=403)
+
+        fus = get_object_or_404(FUS, pk=pk, activo=1, idSolicitanteInterno=propietario)
         turnados = Turnado.objects.filter(
             idFus=fus, activo=1
         ).select_related(
