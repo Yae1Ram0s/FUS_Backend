@@ -442,6 +442,8 @@ class CorreoAutorizadoListView(APIView):
             return Response({'detail': 'Email y nombre son requeridos.'}, status=400)
         if rol not in ('ROL1', 'ROL2', 'COMISIONADO'):
             return Response({'detail': 'Rol inválido.'}, status=400)
+        if rol == 'COMISIONADO' and not unidad_id:
+            return Response({'detail': 'Selecciona la dirección a la que quedará vinculado el comisionado.'}, status=400)
         if CorreoAutorizado.objects.filter(email=email).exists():
             return Response({'detail': 'Este correo ya está registrado.'}, status=400)
         if unidad_id and not UnidadAdministrativa.objects.filter(pk=unidad_id, activo=1).exists():

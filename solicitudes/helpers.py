@@ -51,7 +51,7 @@ def notificar_por_correo(notificacion):
     elif rol == 'ROL2':
         ruta = '/rol2/solicitudes'
     else:
-        ruta = '/comisionado/mis-fus'
+        ruta = '/comisionado/fus-comisionados'
     query = urlencode({'modo': 'lista', 'folio': notificacion.fusFolio})
     url_fus = f'{settings.FRONTEND_URL}{ruta}?{query}'
 

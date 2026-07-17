@@ -38,6 +38,7 @@ class FUSSerializer(serializers.ModelSerializer):
     estatusParticular    = serializers.CharField(source='estatusParticular_id', read_only=True)
     slaVencido           = serializers.SerializerMethodField()
     slaPorVencer         = serializers.SerializerMethodField()
+    direccionComisionado = serializers.SerializerMethodField()
 
     class Meta:
         model  = FUS
@@ -47,8 +48,13 @@ class FUSSerializer(serializers.ModelSerializer):
             'prioridad', 'criterios', 'estatusParticular', 'fechaConclusion',
             'nombreExterno', 'telefonoExterno', 'correoExterno', 'evidencias',
             'fechaLimite', 'slaVencido', 'slaPorVencer',
-            'idComisionado', 'fechaAsignacion',
+            'idComisionado', 'fechaAsignacion', 'direccionComisionado',
         ]
+
+    def get_direccionComisionado(self, obj):
+        if not obj.idComisionado_id:
+            return None
+        return _resolver_unidad_administrativa(obj.idComisionado)
 
     def get_slaVencido(self, obj):
         from django.utils import timezone

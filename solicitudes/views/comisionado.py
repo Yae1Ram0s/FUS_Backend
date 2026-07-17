@@ -9,7 +9,7 @@ from rest_framework.permissions import IsAuthenticated
 
 from autenticacion.models import CorreoAutorizado
 from ..models import FUS, Notificacion, SeguimientoRespuesta
-from ..serializers import FUSSerializer, SeguimientoRespuestaSerializer, UserMiniSerializer
+from ..serializers import FUSSerializer, SeguimientoRespuestaSerializer
 from ..helpers import notificar_por_correo
 from .helpers import _rol, _log
 from .turnado import _push_notificacion
@@ -39,16 +39,26 @@ class FUSComisionadosDisponiblesView(APIView):
 
         get_object_or_404(FUS, pk=pk, activo=1)
 
-        qs = CorreoAutorizado.objects.filter(
+        qs = CorreoAutorizado.objects.select_related('unidadAdministrativa').filter(
             rol='COMISIONADO', activo=1, unidadAdministrativa_id=_unidad_id(request.user)
         )
         q = request.query_params.get('q')
         if q:
             qs = qs.filter(Q(nombre__icontains=q) | Q(email__icontains=q))
 
-        emails = qs.values_list('email', flat=True)
-        usuarios = User.objects.filter(email__in=emails, is_active=True)
-        return Response(UserMiniSerializer(usuarios, many=True).data)
+        usuarios_por_email = {
+            u.email: u.id for u in User.objects.filter(email__in=qs.values_list('email', flat=True), is_active=True)
+        }
+        data = [
+            {
+                'id': usuarios_por_email[ca.email],
+                'nombre': ca.nombre,
+                'email': ca.email,
+                'direccion': ca.unidadAdministrativa.unidadAdministrativa if ca.unidadAdministrativa_id else None,
+            }
+            for ca in qs if ca.email in usuarios_por_email
+        ]
+        return Response(data)
 
 
 class ComisionarFUSView(APIView):
