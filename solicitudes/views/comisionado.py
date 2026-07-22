@@ -190,6 +190,15 @@ class SeguimientoComisionadoListCreateView(APIView):
                      ip=request.META.get('REMOTE_ADDR'), folio=fus.folio,
                      estado_ant=est_ant, estado_nuevo='Atendido')
 
+                # Si el rechazo había reflejado 'Rechazado' en Turnado.estatusTitular
+                # (ver RechazarSolicitudView), esta reapertura lo regresa a
+                # 'En_seguimiento' — mismo estatus con el que arrancó el turnado, ya
+                # que el Titular vuelve a tener seguimiento pendiente del comisionado.
+                if est_ant == 'Rechazado':
+                    fus.turnados.filter(activo=1, estatusTitular_id='Rechazado').update(
+                        estatusTitular_id='En_seguimiento', idUsuarioModifica=user.id
+                    )
+
         return Response(SeguimientoRespuestaSerializer(seg).data, status=201)
 
 
@@ -318,6 +327,13 @@ class RechazarSolicitudView(APIView):
             fus.estatusParticular_id = 'Rechazado'
             fus.idUsuarioModifica = user.id
             fus.save()
+
+            # Mismo espejo que en ConcluirAsuntoView: sin esto, Turnado.estatusTitular
+            # se queda pegado en "En_seguimiento" para el Titular aunque el FUS ya
+            # esté Rechazado.
+            fus.turnados.filter(activo=1).exclude(estatusTitular_id='Rechazado').update(
+                estatusTitular_id='Rechazado', idUsuarioModifica=user.id
+            )
 
             SeguimientoRespuesta.objects.create(idFus=fus, idAutor=user, tipo='rechazo', contenido=motivo)
 
