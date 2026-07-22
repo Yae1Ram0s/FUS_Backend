@@ -169,7 +169,8 @@ class Bitacora(models.Model):
         ('ELIMINACION', 'Eliminación lógica'),
         ('ASIGNACION_COMISIONADO', 'Asignación a comisionado'),
         ('SEGUIMIENTO_COMISIONADO', 'Seguimiento de comisionado'),
-        ('FINALIZACION_SEGUIMIENTO', 'Finalización de seguimiento'),
+        ('FINALIZACION_SEGUIMIENTO', 'Finalización de seguimiento'),  # ya no se genera; se conserva por bitácora histórica
+        ('ATENCION_FUS', 'Atención de FUS (comisionado)'),
         ('APROBACION_FUS', 'Aprobación de FUS'),
         ('RECHAZO_FUS', 'Rechazo de FUS'),
     ]

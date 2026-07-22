@@ -2,8 +2,9 @@ from rest_framework import serializers
 from django.contrib.auth.models import User
 from catalogos.models import MedioRecepcion
 from .models import FUS, Evidencia, Turnado, Seguimiento, Notificacion, Bitacora, Actividad, SeguimientoRespuesta
-from .utils import resolver_nombre
+from .utils import resolver_nombre, get_rol
 from .helpers import _resolver_unidad_administrativa
+from .permissions import _unidad_id
 
 
 class UserMiniSerializer(serializers.ModelSerializer):
@@ -90,6 +91,134 @@ class SeguimientoRespuestaSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('El contenido no puede estar vacío.')
         return value
 
+
+class SeguimientoComisionadoCreateSerializer(SeguimientoRespuestaSerializer):
+    """POST seguimiento del Comisionado: restringe `tipo` a los valores que el
+    Comisionado puede reportar (la finalización/rechazo ya no las genera él,
+    las produce el flujo de atendido/validación) y valida que el FUS siga en
+    curso. 'En_seguimiento' = aún sin ninguna respuesta; 'Atendido' = ya tiene
+    al menos una (la vista hace esa transición en la primera). Ambas admiten
+    seguir agregando respuestas. Requiere `fus` en el context."""
+
+    TIPOS_PERMITIDOS = ('accion_por_emprender', 'avance')
+    ESTATUS_PERMITIDOS = ('En_seguimiento', 'Atendido')
+
+    class Meta(SeguimientoRespuestaSerializer.Meta):
+        fields = ['tipo', 'contenido']
+
+    def validate_tipo(self, value):
+        if value not in self.TIPOS_PERMITIDOS:
+            raise serializers.ValidationError('Tipo de seguimiento inválido.')
+        return value
+
+    def validate(self, attrs):
+        fus = self.context['fus']
+        if fus.estatusParticular_id not in self.ESTATUS_PERMITIDOS:
+            raise serializers.ValidationError(
+                'Solo se puede dar seguimiento mientras la solicitud está en seguimiento.'
+            )
+        return attrs
+
+
+class ComisionarFUSSerializer(serializers.Serializer):
+    """Valida la transición de estatus y que el comisionado elegido
+    pertenezca a la misma dirección/unidad de quien comisiona.
+
+    Rol 1 comisiona directo desde 'Registrado' (sin turnado de por medio).
+    Rol 2 comisiona desde el Turnado que le fue asignado a él específicamente
+    (no cualquier Turnado de la dirección), exigiendo que siga 'Recibido' y
+    que el FUS siga globalmente en 'Turnado' (evita que dos titulares del
+    mismo FUS se pisen si ya fue comisionado por otro). Requiere `request` y
+    `fus` en el context."""
+
+    comisionado_id = serializers.IntegerField(required=True)
+
+    def validate(self, attrs):
+        request = self.context['request']
+        fus     = self.context['fus']
+        user    = request.user
+        rol     = get_rol(user)
+
+        if fus.estatusParticular_id == 'Concluido':
+            raise serializers.ValidationError(
+                'La solicitud ya fue concluida y no puede asignarse a un comisionado.'
+            )
+
+        if rol == 'ROL1':
+            if fus.estatusParticular_id != 'Registrado':
+                raise serializers.ValidationError(
+                    'La solicitud debe estar en estatus "Registrado" para asignar un comisionado.'
+                )
+            attrs['turnado'] = None
+        else:
+            turnado = Turnado.objects.filter(idFus=fus, idDestinatario=user, activo=1).first()
+            if fus.estatusParticular_id != 'Turnado' or not turnado or turnado.estatusTitular_id != 'Recibido':
+                raise serializers.ValidationError(
+                    'La solicitud debe estar en estatus "Turnado" y "Recibido" en tu bandeja para asignar un comisionado.'
+                )
+            attrs['turnado'] = turnado
+
+        comisionado = User.objects.filter(pk=attrs['comisionado_id']).first()
+        if not comisionado:
+            raise serializers.ValidationError(
+                'Debe seleccionar un comisionado para poder guardar la asignación.'
+            )
+        if get_rol(comisionado) != 'COMISIONADO' or _unidad_id(comisionado) != _unidad_id(user):
+            raise serializers.ValidationError(
+                'El comisionado seleccionado no pertenece a tu dirección/unidad administrativa.'
+            )
+
+        attrs['comisionado'] = comisionado
+        return attrs
+
+
+class AtendidoFUSSerializer(serializers.Serializer):
+    """Confirma el paso a validación — exige que el comisionado ya haya
+    registrado al menos una respuesta (estatus 'Atendido', que la vista de
+    seguimiento asigna automáticamente en la primera). 'En_seguimiento' solo
+    significa "comisionado asignado, aún sin responder": no basta. Requiere
+    `fus` en el context."""
+
+    def validate(self, attrs):
+        fus = self.context['fus']
+        if fus.estatusParticular_id != 'Atendido':
+            raise serializers.ValidationError(
+                'El comisionado debe registrar al menos una respuesta antes de poder marcarla como atendida.'
+            )
+        return attrs
+
+
+class ConcluirAsuntoSerializer(serializers.Serializer):
+    """Valida que el FUS esté pendiente de validación antes de concluirlo.
+    Requiere `fus` en el context."""
+
+    def validate(self, attrs):
+        fus = self.context['fus']
+        if fus.estatusParticular_id != 'Pendiente_validacion':
+            raise serializers.ValidationError(
+                'La solicitud debe estar pendiente de validación para poder aprobarla.'
+            )
+        return attrs
+
+
+class RechazarSolicitudSerializer(serializers.Serializer):
+    """Valida que el FUS esté pendiente de validación y que venga un motivo
+    no vacío. El efecto (estatus → Rechazado) lo aplica la vista. Requiere
+    `fus` en el context."""
+
+    motivo = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def validate(self, attrs):
+        fus = self.context['fus']
+        if fus.estatusParticular_id != 'Pendiente_validacion':
+            raise serializers.ValidationError(
+                'La solicitud debe estar pendiente de validación para poder rechazarla.'
+            )
+        motivo = (attrs.get('motivo') or '').strip()
+        if not motivo:
+            raise serializers.ValidationError('Debes escribir un motivo antes de rechazar.')
+        attrs['motivo'] = motivo
+        return attrs
 
 
 class NotificacionSerializer(serializers.ModelSerializer):

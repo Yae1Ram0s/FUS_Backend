@@ -1,4 +1,5 @@
 from django.contrib.auth.models import User
+from django.db import transaction
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -8,37 +9,47 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
 from autenticacion.models import CorreoAutorizado
-from ..models import FUS, Notificacion, SeguimientoRespuesta
-from ..serializers import FUSSerializer, SeguimientoRespuestaSerializer
+from ..models import FUS, Bitacora, Notificacion, SeguimientoRespuesta
+from ..serializers import (
+    FUSSerializer, SeguimientoRespuestaSerializer, SeguimientoComisionadoCreateSerializer,
+    ComisionarFUSSerializer, AtendidoFUSSerializer, ConcluirAsuntoSerializer, RechazarSolicitudSerializer,
+)
+from ..permissions import (
+    _unidad_id, _es_rol1_o_turnado_destinatario,
+    EsRol1oRol2, EsRol1oTurnadoDestinatario, EsRol1DeLaDireccionComisionado,
+    EsComisionado, EsComisionadoAsignado, PuedeVerSeguimientoComisionado,
+)
 from ..helpers import notificar_por_correo
-from .helpers import _rol, _log
+from .helpers import _rol, _log, _primer_error
 from .turnado import _push_notificacion
 
 
-def _unidad_id(user):
-    if not user:
-        return None
-    ca = CorreoAutorizado.objects.filter(email=user.email, activo=1).first()
-    return ca.unidadAdministrativa_id if ca else None
-
-
-def _titulares_area(unidad_id):
+def _particulares_area(unidad_id):
     emails = CorreoAutorizado.objects.filter(
-        rol='ROL2', activo=1, unidadAdministrativa_id=unidad_id
+        rol='ROL1', activo=1, unidadAdministrativa_id=unidad_id
     ).values_list('email', flat=True)
     return User.objects.filter(email__in=emails, is_active=True)
+
+
+def _quien_comisiono(fus):
+    """Usuario (ROL1/ROL2) que ejecutó `comisionar` sobre este FUS, resuelto a
+    partir de la bitácora — no hay campo dedicado en el modelo FUS."""
+    entrada = Bitacora.objects.filter(
+        fusFolio=fus.folio, accion='ASIGNACION_COMISIONADO'
+    ).order_by('-fechaHora').first()
+    if not entrada:
+        return None
+    return User.objects.filter(email=entrada.usuario, is_active=True).first()
 
 
 class FUSComisionadosDisponiblesView(APIView):
     """GET — usuarios rol=COMISIONADO de la misma unidad administrativa que el
     usuario autenticado (ROL1 o ROL2, ambos con facultad de comisionar)."""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, EsRol1oRol2]
 
     def get(self, request, pk):
-        if _rol(request.user) not in ('ROL1', 'ROL2'):
-            return Response({'detail': 'No autorizado.'}, status=403)
-
-        get_object_or_404(FUS, pk=pk, activo=1)
+        fus = get_object_or_404(FUS, pk=pk, activo=1)
+        self.check_object_permissions(request, fus)
 
         qs = CorreoAutorizado.objects.select_related('unidadAdministrativa').filter(
             rol='COMISIONADO', activo=1, unidadAdministrativa_id=_unidad_id(request.user)
@@ -63,62 +74,47 @@ class FUSComisionadosDisponiblesView(APIView):
 
 
 class ComisionarFUSView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, EsRol1oTurnadoDestinatario]
 
     def post(self, request, pk):
-        user = request.user
-        rol  = _rol(user)
-        if rol not in ('ROL1', 'ROL2'):
-            return Response({'detail': 'No autorizado.'}, status=403)
-
         fus = get_object_or_404(FUS, pk=pk, activo=1)
+        self.check_object_permissions(request, fus)
 
-        # ROL1 comisiona directamente desde "Registrado" (antes de turnar); ROL2
-        # solo ve el FUS una vez que se lo turnan, así que su vía sigue siendo "Turnado".
-        estatus_requerido = 'Registrado' if rol == 'ROL1' else 'Turnado'
+        ser = ComisionarFUSSerializer(data=request.data, context={'request': request, 'fus': fus})
+        if not ser.is_valid():
+            return Response({'detail': _primer_error(ser)}, status=400)
 
-        if fus.estatusParticular_id == 'Concluido':
-            return Response(
-                {'detail': 'La solicitud ya fue concluida y no puede asignarse a un comisionado.'}, status=400
+        user        = request.user
+        rol         = _rol(user)
+        comisionado = ser.validated_data['comisionado']
+        turnado     = ser.validated_data['turnado']
+        ip          = request.META.get('REMOTE_ADDR')
+        est_ant     = fus.estatusParticular_id
+
+        with transaction.atomic():
+            fus.idComisionado = comisionado
+            fus.fechaAsignacion = timezone.now()
+            fus.estatusParticular_id = 'En_seguimiento'
+            fus.idUsuarioModifica = user.id
+            fus.save()
+
+            if turnado:
+                turnado.estatusTitular_id = 'En_seguimiento'
+                turnado.idUsuarioModifica = user.id
+                turnado.save()
+
+            _log(usuario=user.email, rol=rol, accion='ASIGNACION_COMISIONADO',
+                 ip=ip, folio=fus.folio, estado_ant=est_ant, estado_nuevo='En_seguimiento')
+
+            asignador_auth = CorreoAutorizado.objects.filter(email=user.email, activo=1).first()
+            nombre_asignador = asignador_auth.nombre if asignador_auth else (user.first_name or user.email)
+            notif = Notificacion.objects.create(
+                idDestinatario=comisionado,
+                fusFolio=fus.folio,
+                tipoEvento='ASIGNADO_COMISIONADO',
+                mensaje=f"{nombre_asignador} te asignó el FUS {fus.folio} para su seguimiento.",
             )
-        if fus.estatusParticular_id != estatus_requerido:
-            return Response(
-                {'detail': f'La solicitud debe estar en estatus "{estatus_requerido}" para asignar un comisionado.'}, status=400
-            )
 
-        comisionado_id = request.data.get('comisionado_id')
-        if not comisionado_id:
-            return Response(
-                {'detail': 'Debe seleccionar un comisionado para poder guardar la asignación.'}, status=400
-            )
-
-        comisionado = get_object_or_404(User, pk=comisionado_id)
-        if _rol(comisionado) != 'COMISIONADO' or _unidad_id(comisionado) != _unidad_id(user):
-            return Response(
-                {'detail': 'El comisionado seleccionado no pertenece a tu dirección/unidad administrativa.'}, status=403
-            )
-
-        ip = request.META.get('REMOTE_ADDR')
-        rol = _rol(user)
-        est_ant = fus.estatusParticular_id
-
-        fus.idComisionado = comisionado
-        fus.fechaAsignacion = timezone.now()
-        fus.estatusParticular_id = 'En_seguimiento'
-        fus.idUsuarioModifica = user.id
-        fus.save()
-
-        _log(usuario=user.email, rol=rol, accion='ASIGNACION_COMISIONADO',
-             ip=ip, folio=fus.folio, estado_ant=est_ant, estado_nuevo='En_seguimiento')
-
-        asignador_auth = CorreoAutorizado.objects.filter(email=user.email, activo=1).first()
-        nombre_asignador = asignador_auth.nombre if asignador_auth else (user.first_name or user.email)
-        notif = Notificacion.objects.create(
-            idDestinatario=comisionado,
-            fusFolio=fus.folio,
-            tipoEvento='ASIGNADO_COMISIONADO',
-            mensaje=f"{nombre_asignador} te asignó el FUS {fus.folio} para su seguimiento.",
-        )
         _push_notificacion(notif)
         notificar_por_correo(notif)
 
@@ -127,12 +123,9 @@ class ComisionarFUSView(APIView):
 
 class MisFUSComisionadosView(APIView):
     """GET — FUS asignados al Comisionado autenticado (alimenta su Calendario)."""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, EsComisionado]
 
     def get(self, request):
-        if _rol(request.user) != 'COMISIONADO':
-            return Response({'detail': 'No autorizado.'}, status=403)
-
         qs = FUS.objects.filter(idComisionado=request.user, activo=1).select_related(
             'idSolicitanteInterno', 'idMedioRecepcion', 'idComisionado'
         ).prefetch_related('evidencias').order_by('-fechaAsignacion')
@@ -154,168 +147,201 @@ class MisFUSComisionadosView(APIView):
 
 
 class SeguimientoComisionadoListCreateView(APIView):
-    permission_classes = [IsAuthenticated]
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsAuthenticated(), EsComisionadoAsignado()]
+        return [IsAuthenticated(), PuedeVerSeguimientoComisionado()]
 
     def get(self, request, pk):
-        fus  = get_object_or_404(FUS, pk=pk, activo=1)
-        user = request.user
-        rol  = _rol(user)
+        fus = get_object_or_404(FUS, pk=pk, activo=1)
+        self.check_object_permissions(request, fus)
 
-        tiene_facultad_area = rol in ('ROL1', 'ROL2') and fus.idComisionado_id and _unidad_id(user) == _unidad_id(fus.idComisionado)
-        es_comisionado_asignado = rol == 'COMISIONADO' and fus.idComisionado_id == user.id
-        if not (tiene_facultad_area or es_comisionado_asignado):
-            return Response({'detail': 'No autorizado.'}, status=403)
+        # Reapertura automática: si quien consulta tiene facultad de comisionar
+        # sobre este FUS (Rol 1, o Rol 2 destinatario del Turnado) y sigue
+        # "Rechazado", se reabre en esta misma lectura. Se reabre a "Atendido"
+        # (no "En_seguimiento"): solo se llega a Rechazado pasando antes por
+        # atendido/, que ya exige al menos una respuesta previa del
+        # comisionado — nunca es el primer contacto. select_for_update +
+        # relectura del estatus dentro de la transacción evita que dos GETs
+        # concurrentes disparen la reapertura dos veces.
+        if fus.estatusParticular_id == 'Rechazado' and _es_rol1_o_turnado_destinatario(request.user, fus):
+            with transaction.atomic():
+                fus_lock = FUS.objects.select_for_update().get(pk=fus.pk)
+                if fus_lock.estatusParticular_id == 'Rechazado':
+                    fus_lock.estatusParticular_id = 'Atendido'
+                    fus_lock.idUsuarioModifica = request.user.id
+                    fus_lock.save()
+
+                    _log(usuario=request.user.email, rol=_rol(request.user), accion='REAPERTURA_FUS',
+                         ip=request.META.get('REMOTE_ADDR'), folio=fus_lock.folio,
+                         estado_ant='Rechazado', estado_nuevo='Atendido')
+                fus.estatusParticular_id = fus_lock.estatusParticular_id
 
         qs = SeguimientoRespuesta.objects.filter(idFus=fus, activo=1).select_related('idAutor').order_by('fechaRegistro')
         return Response(SeguimientoRespuestaSerializer(qs, many=True).data)
 
     def post(self, request, pk):
-        fus  = get_object_or_404(FUS, pk=pk, activo=1)
-        user = request.user
+        fus = get_object_or_404(FUS, pk=pk, activo=1)
+        self.check_object_permissions(request, fus)
 
-        if _rol(user) != 'COMISIONADO' or fus.idComisionado_id != user.id:
-            return Response({'detail': 'No autorizado.'}, status=403)
-        if fus.estatusParticular_id != 'En_seguimiento':
-            return Response(
-                {'detail': 'Solo se puede dar seguimiento mientras la solicitud está en seguimiento.'}, status=400
-            )
-
-        tipo = request.data.get('tipo')
-        if tipo not in ('accion_por_emprender', 'avance'):
-            return Response({'detail': 'Tipo de seguimiento inválido.'}, status=400)
-
-        ser = SeguimientoRespuestaSerializer(data={'tipo': tipo, 'contenido': request.data.get('contenido')})
+        ser = SeguimientoComisionadoCreateSerializer(data=request.data, context={'fus': fus})
         ser.is_valid(raise_exception=True)
 
-        seg = SeguimientoRespuesta.objects.create(idFus=fus, idAutor=user, **ser.validated_data)
+        user = request.user
+        with transaction.atomic():
+            seg = SeguimientoRespuesta.objects.create(idFus=fus, idAutor=user, **ser.validated_data)
 
-        _log(usuario=user.email, rol=_rol(user), accion='SEGUIMIENTO_COMISIONADO',
-             ip=request.META.get('REMOTE_ADDR'), folio=fus.folio)
+            _log(usuario=user.email, rol=_rol(user), accion='SEGUIMIENTO_COMISIONADO',
+                 ip=request.META.get('REMOTE_ADDR'), folio=fus.folio)
+
+            # Primera respuesta del comisionado: En_seguimiento → Atendido.
+            # A partir de aquí ya se puede confirmar "atendido" (ver
+            # AtendidoFUSSerializer) — respuestas siguientes no repiten esto.
+            if fus.estatusParticular_id == 'En_seguimiento':
+                fus.estatusParticular_id = 'Atendido'
+                fus.idUsuarioModifica = user.id
+                fus.save()
+
+                _log(usuario=user.email, rol=_rol(user), accion='ASIGNACION_ESTADO',
+                     ip=request.META.get('REMOTE_ADDR'), folio=fus.folio,
+                     estado_ant='En_seguimiento', estado_nuevo='Atendido')
 
         return Response(SeguimientoRespuestaSerializer(seg).data, status=201)
 
 
-class FinalizarSeguimientoView(APIView):
-    permission_classes = [IsAuthenticated]
+class AtendidoFUSView(APIView):
+    """POST — el comisionado terminó su seguimiento; pasa la solicitud a
+    validación del Particular. Lo puede disparar Rol 1, o Rol 2 destinatario
+    específico del Turnado de este FUS (no el propio comisionado, ni
+    cualquier Rol 2 de la dirección)."""
+    permission_classes = [IsAuthenticated, EsRol1oTurnadoDestinatario]
 
     def post(self, request, pk):
-        user = request.user
-        fus  = get_object_or_404(FUS, pk=pk, activo=1)
+        fus = get_object_or_404(FUS, pk=pk, activo=1)
+        self.check_object_permissions(request, fus)
 
-        if _rol(user) != 'COMISIONADO' or fus.idComisionado_id != user.id:
-            return Response({'detail': 'No autorizado.'}, status=403)
-        if fus.estatusParticular_id != 'En_seguimiento':
-            return Response(
-                {'detail': 'La solicitud debe estar en seguimiento para poder finalizarla.'}, status=400
-            )
+        ser = AtendidoFUSSerializer(data=request.data, context={'fus': fus})
+        if not ser.is_valid():
+            return Response({'detail': _primer_error(ser)}, status=400)
 
+        user    = request.user
+        rol     = _rol(user)
         ip      = request.META.get('REMOTE_ADDR')
         est_ant = fus.estatusParticular_id
 
-        fus.estatusParticular_id = 'Pendiente_validacion'
-        fus.idUsuarioModifica = user.id
-        fus.save()
+        with transaction.atomic():
+            fus.estatusParticular_id = 'Pendiente_validacion'
+            fus.idUsuarioModifica = user.id
+            fus.save()
 
-        SeguimientoRespuesta.objects.create(
-            idFus=fus, idAutor=user, tipo='finalizacion',
-            contenido=(request.data.get('contenido') or '').strip() or 'Seguimiento finalizado, pendiente de validación.',
-        )
+            _log(usuario=user.email, rol=rol, accion='ATENCION_FUS',
+                 ip=ip, folio=fus.folio, estado_ant=est_ant, estado_nuevo='Pendiente_validacion')
 
-        _log(usuario=user.email, rol=_rol(user), accion='FINALIZACION_SEGUIMIENTO',
-             ip=ip, folio=fus.folio, estado_ant=est_ant, estado_nuevo='Pendiente_validacion')
+            notificaciones = [
+                Notificacion.objects.create(
+                    idDestinatario=particular,
+                    fusFolio=fus.folio,
+                    tipoEvento='SEGUIMIENTO_FINALIZADO',
+                    mensaje=f"El seguimiento del FUS {fus.folio} fue atendido y está pendiente de tu validación.",
+                )
+                for particular in _particulares_area(_unidad_id(fus.idComisionado))
+            ]
 
-        for titular in _titulares_area(_unidad_id(user)):
-            notif = Notificacion.objects.create(
-                idDestinatario=titular,
-                fusFolio=fus.folio,
-                tipoEvento='SEGUIMIENTO_FINALIZADO',
-                mensaje=f"El seguimiento del FUS {fus.folio} fue finalizado y está pendiente de tu validación.",
-            )
+        for notif in notificaciones:
             _push_notificacion(notif)
             notificar_por_correo(notif)
 
         return Response(FUSSerializer(fus).data)
 
 
-class AprobarFUSView(APIView):
-    permission_classes = [IsAuthenticated]
+class ConcluirAsuntoView(APIView):
+    """POST — validación final positiva. Exclusivo del Particular (ROL1) de
+    la dirección del comisionado asignado."""
+    permission_classes = [IsAuthenticated, EsRol1DeLaDireccionComisionado]
 
     def post(self, request, pk):
-        user = request.user
-        if _rol(user) not in ('ROL1', 'ROL2'):
-            return Response({'detail': 'No autorizado.'}, status=403)
-
         fus = get_object_or_404(FUS, pk=pk, activo=1)
-        if not fus.idComisionado_id or _unidad_id(fus.idComisionado) != _unidad_id(user):
-            return Response({'detail': 'No autorizado.'}, status=403)
-        if fus.estatusParticular_id != 'Pendiente_validacion':
-            return Response(
-                {'detail': 'La solicitud debe estar pendiente de validación para poder aprobarla.'}, status=400
-            )
+        self.check_object_permissions(request, fus)
 
+        ser = ConcluirAsuntoSerializer(data=request.data, context={'fus': fus})
+        if not ser.is_valid():
+            return Response({'detail': _primer_error(ser)}, status=400)
+
+        user    = request.user
         ip      = request.META.get('REMOTE_ADDR')
         est_ant = fus.estatusParticular_id
+        comisionador = _quien_comisiono(fus)
 
-        fus.estatusParticular_id = 'Concluido'
-        fus.fechaConclusion = timezone.now()
-        fus.idUsuarioModifica = user.id
-        fus.save()
+        with transaction.atomic():
+            fus.estatusParticular_id = 'Concluido'
+            fus.fechaConclusion = timezone.now()
+            fus.idUsuarioModifica = user.id
+            fus.save()
 
-        _log(usuario=user.email, rol=_rol(user), accion='APROBACION_FUS',
-             ip=ip, folio=fus.folio, estado_ant=est_ant, estado_nuevo='Concluido')
+            _log(usuario=user.email, rol=_rol(user), accion='APROBACION_FUS',
+                 ip=ip, folio=fus.folio, estado_ant=est_ant, estado_nuevo='Concluido')
 
-        if fus.idComisionado:
-            notif = Notificacion.objects.create(
-                idDestinatario=fus.idComisionado,
-                fusFolio=fus.folio,
-                tipoEvento='SOLICITUD_APROBADA',
-                mensaje=f"Tu seguimiento del FUS {fus.folio} fue aprobado y la solicitud fue concluida.",
-            )
+            destinatarios = {u for u in (fus.idComisionado, comisionador) if u}
+            notificaciones = [
+                Notificacion.objects.create(
+                    idDestinatario=destinatario,
+                    fusFolio=fus.folio,
+                    tipoEvento='SOLICITUD_APROBADA',
+                    mensaje=f"El FUS {fus.folio} fue aprobado y la solicitud fue concluida.",
+                )
+                for destinatario in destinatarios
+            ]
+
+        for notif in notificaciones:
             _push_notificacion(notif)
             notificar_por_correo(notif)
 
         return Response(FUSSerializer(fus).data)
 
 
-class RechazarFUSView(APIView):
-    permission_classes = [IsAuthenticated]
+class RechazarSolicitudView(APIView):
+    """POST {motivo} — validación final negativa: NO regresa directo a
+    seguimiento, queda en "Rechazado" hasta que quien tiene facultad de
+    comisionar (Rol 1 o el Rol 2 destinatario del Turnado) vuelva a consultarla
+    (ver SeguimientoComisionadoListCreateView.get, que dispara la reapertura
+    automática a En_seguimiento). Exclusivo del Particular (ROL1) de la
+    dirección del comisionado asignado."""
+    permission_classes = [IsAuthenticated, EsRol1DeLaDireccionComisionado]
 
     def post(self, request, pk):
-        user = request.user
-        if _rol(user) not in ('ROL1', 'ROL2'):
-            return Response({'detail': 'No autorizado.'}, status=403)
-
         fus = get_object_or_404(FUS, pk=pk, activo=1)
-        if not fus.idComisionado_id or _unidad_id(fus.idComisionado) != _unidad_id(user):
-            return Response({'detail': 'No autorizado.'}, status=403)
-        if fus.estatusParticular_id != 'Pendiente_validacion':
-            return Response(
-                {'detail': 'La solicitud debe estar pendiente de validación para poder rechazarla.'}, status=400
-            )
+        self.check_object_permissions(request, fus)
 
-        motivo = (request.data.get('motivo') or '').strip()
-        if not motivo:
-            return Response({'detail': 'Debes escribir un motivo antes de rechazar.'}, status=400)
+        ser = RechazarSolicitudSerializer(data=request.data, context={'fus': fus})
+        if not ser.is_valid():
+            return Response({'detail': _primer_error(ser)}, status=400)
 
+        motivo  = ser.validated_data['motivo']
+        user    = request.user
         ip      = request.META.get('REMOTE_ADDR')
         est_ant = fus.estatusParticular_id
+        comisionador = _quien_comisiono(fus)
 
-        fus.estatusParticular_id = 'En_seguimiento'
-        fus.idUsuarioModifica = user.id
-        fus.save()
+        with transaction.atomic():
+            fus.estatusParticular_id = 'Rechazado'
+            fus.idUsuarioModifica = user.id
+            fus.save()
 
-        SeguimientoRespuesta.objects.create(idFus=fus, idAutor=user, tipo='rechazo', contenido=motivo)
+            SeguimientoRespuesta.objects.create(idFus=fus, idAutor=user, tipo='rechazo', contenido=motivo)
 
-        _log(usuario=user.email, rol=_rol(user), accion='RECHAZO_FUS',
-             ip=ip, folio=fus.folio, estado_ant=est_ant, estado_nuevo='En_seguimiento', obs=motivo)
+            _log(usuario=user.email, rol=_rol(user), accion='RECHAZO_FUS',
+                 ip=ip, folio=fus.folio, estado_ant=est_ant, estado_nuevo='Rechazado', obs=motivo)
 
-        if fus.idComisionado:
-            notif = Notificacion.objects.create(
-                idDestinatario=fus.idComisionado,
-                fusFolio=fus.folio,
-                tipoEvento='SOLICITUD_RECHAZADA',
-                mensaje=f"Tu seguimiento del FUS {fus.folio} fue rechazado: {motivo}. La solicitud regresó a tu bandeja.",
-            )
+            notif = None
+            if comisionador:
+                notif = Notificacion.objects.create(
+                    idDestinatario=comisionador,
+                    fusFolio=fus.folio,
+                    tipoEvento='SOLICITUD_RECHAZADA',
+                    mensaje=f"El FUS {fus.folio} fue rechazado: {motivo}. Vuelve a consultarlo para reabrirlo a seguimiento.",
+                )
+
+        if notif:
             _push_notificacion(notif)
             notificar_por_correo(notif)
 

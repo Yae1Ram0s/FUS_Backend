@@ -18,7 +18,16 @@ ROLES_PARTICULAR = ('ROL1', 'EQUIPO_PARTICULAR')
 
 ROL1_ACCIONES = ['REGISTRO_RESPUESTA', 'CONCLUSION_FUS', 'ASIGNACION_ESTADO']
 ROL2_ACCIONES = ['CONCLUSION_FUS', 'REGISTRO_RESPUESTA', 'REGISTRO_ACCION']
-COMISIONADO_ACCIONES = ['ASIGNACION_COMISIONADO', 'SEGUIMIENTO_COMISIONADO', 'FINALIZACION_SEGUIMIENTO', 'APROBACION_FUS', 'RECHAZO_FUS']
+COMISIONADO_ACCIONES = ['ASIGNACION_COMISIONADO', 'SEGUIMIENTO_COMISIONADO', 'ATENCION_FUS', 'APROBACION_FUS', 'RECHAZO_FUS']
+
+
+def _primer_error(ser):
+    """Primer mensaje de error de un serializer inválido, como string plano
+    (para responder {'detail': ...} igual que el resto de las vistas)."""
+    for errores in ser.errors.values():
+        if errores:
+            return str(errores[0])
+    return 'Datos inválidos.'
 
 
 def _propietario_fus(user):

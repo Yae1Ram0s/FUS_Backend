@@ -238,6 +238,10 @@ class MisTurnadosView(APIView):
                 idFus__fechaLimite__gte=ahora,
                 idFus__fechaLimite__lte=ahora + timedelta(hours=24),
             )
+        elif estatus in ('Rechazado', 'Pendiente_validacion'):
+            # Viven en FUS.estatusParticular, no en Turnado.estatusTitular —
+            # el sidebar de ROL2 los ofrece bajo el mismo parámetro `estatusTitular`.
+            qs = qs.filter(idFus__estatusParticular_id=estatus)
         elif estatus:
             qs = qs.filter(estatusTitular_id=estatus)
         if search:

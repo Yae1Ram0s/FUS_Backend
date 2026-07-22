@@ -26,9 +26,9 @@ from .views import (
     ComisionarFUSView,
     MisFUSComisionadosView,
     SeguimientoComisionadoListCreateView,
-    FinalizarSeguimientoView,
-    AprobarFUSView,
-    RechazarFUSView,
+    AtendidoFUSView,
+    ConcluirAsuntoView,
+    RechazarSolicitudView,
 )
 
 urlpatterns = [
@@ -77,7 +77,7 @@ urlpatterns = [
     path('fus/<int:pk>/comisionados-disponibles/', FUSComisionadosDisponiblesView.as_view(),  name='fus-comisionados-disponibles'),
     path('fus/<int:pk>/comisionar/',               ComisionarFUSView.as_view(),               name='fus-comisionar'),
     path('fus/<int:pk>/seguimiento/',               SeguimientoComisionadoListCreateView.as_view(), name='fus-seguimiento-comisionado'),
-    path('fus/<int:pk>/finalizar-seguimiento/',    FinalizarSeguimientoView.as_view(),        name='fus-finalizar-seguimiento'),
-    path('fus/<int:pk>/aprobar/',                  AprobarFUSView.as_view(),                  name='fus-aprobar'),
-    path('fus/<int:pk>/rechazar/',                 RechazarFUSView.as_view(),                 name='fus-rechazar'),
+    path('fus/<int:pk>/atendido/',                 AtendidoFUSView.as_view(),                 name='fus-atendido'),
+    path('fus/<int:pk>/concluir-asunto/',          ConcluirAsuntoView.as_view(),               name='fus-concluir-asunto'),
+    path('fus/<int:pk>/rechazar-solicitud/',       RechazarSolicitudView.as_view(),            name='fus-rechazar-solicitud'),
 ]

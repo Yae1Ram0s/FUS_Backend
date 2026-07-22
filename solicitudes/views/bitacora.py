@@ -191,8 +191,10 @@ class ExportarBitacoraExcelView(APIView):
             'ASIGNACION_COMISIONADO': 'Asignación a comisionado',
             'SEGUIMIENTO_COMISIONADO': 'Seguimiento de comisionado',
             'FINALIZACION_SEGUIMIENTO': 'Finalización de seguimiento',
+            'ATENCION_FUS': 'Atención de FUS (comisionado)',
             'APROBACION_FUS': 'Aprobación de FUS',
             'RECHAZO_FUS': 'Rechazo de FUS',
+            'REAPERTURA_FUS': 'Reapertura de FUS',
         }
         nombres_map = dict(
             CorreoAutorizado.objects.filter(
@@ -324,8 +326,10 @@ class ExportarBitacoraPDFView(APIView):
             'ASIGNACION_COMISIONADO': 'Asignación a comisionado',
             'SEGUIMIENTO_COMISIONADO': 'Seguimiento de comisionado',
             'FINALIZACION_SEGUIMIENTO': 'Finalización de seguimiento',
+            'ATENCION_FUS': 'Atención de FUS (comisionado)',
             'APROBACION_FUS': 'Aprobación de FUS',
             'RECHAZO_FUS': 'Rechazo de FUS',
+            'REAPERTURA_FUS': 'Reapertura de FUS',
         }
         nombres_map = dict(
             CorreoAutorizado.objects.filter(

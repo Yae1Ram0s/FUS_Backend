@@ -6,7 +6,6 @@ from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.core.mail import send_mail
 from django.db import IntegrityError
 from django.utils import timezone
 from datetime import timedelta
@@ -21,6 +20,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 
 from .models import CorreoAutorizado, CodigoOTP
 from .serializers import LoginSerializer, UsuarioROL2Serializer
+from .emails import enviar_correo_otp
 from solicitudes.utils import get_rol, log_bitacora as _log
 from catalogos.models import UnidadAdministrativa
 
@@ -80,18 +80,10 @@ class VerificarCorreoView(APIView):
 
         # Usuario nuevo — generar y enviar OTP
         codigo = _generar_otp(email, request.META.get('REMOTE_ADDR'))
-        send_mail(
-            subject='Tu código de acceso — Sistema de Control de Solicitudes',
-            message=(
-                f'Hola {autorizado.nombre},\n\n'
-                f'Tu código de verificación es:\n\n'
-                f'    {codigo}\n\n'
-                f'Válido por 15 minutos. No lo compartas con nadie.\n\n'
-                f'Si no solicitaste este código, ignora este mensaje.'
-            ),
-            from_email=None,
-            recipient_list=[email],
-            fail_silently=False,
+        enviar_correo_otp(
+            email, codigo,
+            intro='Recibimos una solicitud de acceso al Sistema de Control de Solicitudes. Utiliza el siguiente código para completar tu inicio de sesión.',
+            asunto='Tu código de acceso — Sistema de Control de Solicitudes',
         )
         return Response({'estado': 'nuevo'})
 
@@ -207,17 +199,10 @@ class ReenviarOTPView(APIView):
             return Response({'detail': 'Este usuario ya tiene cuenta activa.'}, status=status.HTTP_400_BAD_REQUEST)
 
         codigo = _generar_otp(email, request.META.get('REMOTE_ADDR'))
-        send_mail(
-            subject='Nuevo código de acceso — Sistema de Control de Solicitudes',
-            message=(
-                f'Hola {autorizado.nombre},\n\n'
-                f'Tu nuevo código de verificación es:\n\n'
-                f'    {codigo}\n\n'
-                f'Válido por 15 minutos.'
-            ),
-            from_email=None,
-            recipient_list=[email],
-            fail_silently=False,
+        enviar_correo_otp(
+            email, codigo,
+            intro='Solicitaste un nuevo código de acceso al Sistema de Control de Solicitudes. Utiliza el siguiente código para completar tu inicio de sesión.',
+            asunto='Nuevo código de acceso — Sistema de Control de Solicitudes',
         )
         return Response({'enviado': True})
 
@@ -318,18 +303,10 @@ class RecuperarContrasenaView(APIView):
             return Response({'enviado': True})
 
         codigo = _generar_otp(email, request.META.get('REMOTE_ADDR'))
-        send_mail(
-            subject='Recuperación de contraseña — Sistema de Control de Solicitudes',
-            message=(
-                f'Hola {autorizado.nombre},\n\n'
-                f'Recibimos una solicitud para restablecer tu contraseña.\n\n'
-                f'Tu código de verificación es:\n\n'
-                f'    {codigo}\n\n'
-                f'Válido por 15 minutos. Si no solicitaste esto, ignora este mensaje.'
-            ),
-            from_email=None,
-            recipient_list=[email],
-            fail_silently=False,
+        enviar_correo_otp(
+            email, codigo,
+            intro='Recibimos una solicitud para restablecer tu contraseña del Sistema de Control de Solicitudes. Utiliza el siguiente código para continuar.',
+            asunto='Recuperación de contraseña — Sistema de Control de Solicitudes',
         )
         return Response({'enviado': True})
 
