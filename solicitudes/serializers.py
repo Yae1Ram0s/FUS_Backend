@@ -40,6 +40,7 @@ class FUSSerializer(serializers.ModelSerializer):
     slaVencido           = serializers.SerializerMethodField()
     slaPorVencer         = serializers.SerializerMethodField()
     direccionComisionado = serializers.SerializerMethodField()
+    tieneTurnado         = serializers.SerializerMethodField()
 
     class Meta:
         model  = FUS
@@ -49,13 +50,19 @@ class FUSSerializer(serializers.ModelSerializer):
             'prioridad', 'criterios', 'estatusParticular', 'fechaConclusion',
             'nombreExterno', 'telefonoExterno', 'correoExterno', 'evidencias',
             'fechaLimite', 'slaVencido', 'slaPorVencer',
-            'idComisionado', 'fechaAsignacion', 'direccionComisionado',
+            'idComisionado', 'fechaAsignacion', 'direccionComisionado', 'tieneTurnado',
         ]
 
     def get_direccionComisionado(self, obj):
         if not obj.idComisionado_id:
             return None
         return _resolver_unidad_administrativa(obj.idComisionado)
+
+    def get_tieneTurnado(self, obj):
+        # True si el FUS pasó por el flujo de Titular (se turnó a un ROL2)
+        # antes de comisionarse, aunque sea a otra dirección — false si el
+        # Particular lo comisionó directo desde "Registrado".
+        return obj.turnados.filter(activo=1).exists()
 
     def get_slaVencido(self, obj):
         from django.utils import timezone
@@ -97,11 +104,12 @@ class SeguimientoComisionadoCreateSerializer(SeguimientoRespuestaSerializer):
     Comisionado puede reportar (la finalización/rechazo ya no las genera él,
     las produce el flujo de atendido/validación) y valida que el FUS siga en
     curso. 'En_seguimiento' = aún sin ninguna respuesta; 'Atendido' = ya tiene
-    al menos una (la vista hace esa transición en la primera). Ambas admiten
+    al menos una; 'Rechazado' = el Particular la rechazó y esta respuesta es
+    la que la reabre directo a 'Atendido' (ver la vista). Todas admiten
     seguir agregando respuestas. Requiere `fus` en el context."""
 
     TIPOS_PERMITIDOS = ('accion_por_emprender', 'avance')
-    ESTATUS_PERMITIDOS = ('En_seguimiento', 'Atendido')
+    ESTATUS_PERMITIDOS = ('En_seguimiento', 'Atendido', 'Rechazado')
 
     class Meta(SeguimientoRespuestaSerializer.Meta):
         fields = ['tipo', 'contenido']
@@ -188,13 +196,22 @@ class AtendidoFUSSerializer(serializers.Serializer):
         return attrs
 
 
+def _validable_por_rol1(fus):
+    """Pendiente_validacion (turnado a Rol 2, que ya confirmó "Atendido"), o
+    directo en 'Atendido' cuando el FUS no tiene turnado — ahí Rol 1
+    comisionó de frente, nadie más confirma "Atendido", así que valida sobre
+    la primera respuesta del comisionado sin ese paso intermedio."""
+    if fus.estatusParticular_id == 'Pendiente_validacion':
+        return True
+    return fus.estatusParticular_id == 'Atendido' and not fus.turnados.filter(activo=1).exists()
+
+
 class ConcluirAsuntoSerializer(serializers.Serializer):
-    """Valida que el FUS esté pendiente de validación antes de concluirlo.
-    Requiere `fus` en el context."""
+    """Valida que el FUS esté listo para concluirse. Requiere `fus` en el
+    context."""
 
     def validate(self, attrs):
-        fus = self.context['fus']
-        if fus.estatusParticular_id != 'Pendiente_validacion':
+        if not _validable_por_rol1(self.context['fus']):
             raise serializers.ValidationError(
                 'La solicitud debe estar pendiente de validación para poder aprobarla.'
             )
@@ -202,15 +219,14 @@ class ConcluirAsuntoSerializer(serializers.Serializer):
 
 
 class RechazarSolicitudSerializer(serializers.Serializer):
-    """Valida que el FUS esté pendiente de validación y que venga un motivo
-    no vacío. El efecto (estatus → Rechazado) lo aplica la vista. Requiere
-    `fus` en el context."""
+    """Valida que el FUS esté listo para rechazarse y que venga un motivo no
+    vacío. El efecto (estatus → Rechazado) lo aplica la vista. Requiere `fus`
+    en el context."""
 
     motivo = serializers.CharField(required=False, allow_blank=True, default='')
 
     def validate(self, attrs):
-        fus = self.context['fus']
-        if fus.estatusParticular_id != 'Pendiente_validacion':
+        if not _validable_por_rol1(self.context['fus']):
             raise serializers.ValidationError(
                 'La solicitud debe estar pendiente de validación para poder rechazarla.'
             )

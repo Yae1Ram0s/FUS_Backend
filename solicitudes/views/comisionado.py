@@ -15,8 +15,8 @@ from ..serializers import (
     ComisionarFUSSerializer, AtendidoFUSSerializer, ConcluirAsuntoSerializer, RechazarSolicitudSerializer,
 )
 from ..permissions import (
-    _unidad_id, _es_rol1_o_turnado_destinatario,
-    EsRol1oRol2, EsRol1oTurnadoDestinatario, EsRol1DeLaDireccionComisionado,
+    _unidad_id,
+    EsRol1oRol2, EsRol1oTurnadoDestinatario, EsRol1DuenoDelFUS,
     EsComisionado, EsComisionadoAsignado, PuedeVerSeguimientoComisionado,
 )
 from ..helpers import notificar_por_correo
@@ -156,27 +156,6 @@ class SeguimientoComisionadoListCreateView(APIView):
         fus = get_object_or_404(FUS, pk=pk, activo=1)
         self.check_object_permissions(request, fus)
 
-        # Reapertura automática: si quien consulta tiene facultad de comisionar
-        # sobre este FUS (Rol 1, o Rol 2 destinatario del Turnado) y sigue
-        # "Rechazado", se reabre en esta misma lectura. Se reabre a "Atendido"
-        # (no "En_seguimiento"): solo se llega a Rechazado pasando antes por
-        # atendido/, que ya exige al menos una respuesta previa del
-        # comisionado — nunca es el primer contacto. select_for_update +
-        # relectura del estatus dentro de la transacción evita que dos GETs
-        # concurrentes disparen la reapertura dos veces.
-        if fus.estatusParticular_id == 'Rechazado' and _es_rol1_o_turnado_destinatario(request.user, fus):
-            with transaction.atomic():
-                fus_lock = FUS.objects.select_for_update().get(pk=fus.pk)
-                if fus_lock.estatusParticular_id == 'Rechazado':
-                    fus_lock.estatusParticular_id = 'Atendido'
-                    fus_lock.idUsuarioModifica = request.user.id
-                    fus_lock.save()
-
-                    _log(usuario=request.user.email, rol=_rol(request.user), accion='REAPERTURA_FUS',
-                         ip=request.META.get('REMOTE_ADDR'), folio=fus_lock.folio,
-                         estado_ant='Rechazado', estado_nuevo='Atendido')
-                fus.estatusParticular_id = fus_lock.estatusParticular_id
-
         qs = SeguimientoRespuesta.objects.filter(idFus=fus, activo=1).select_related('idAutor').order_by('fechaRegistro')
         return Response(SeguimientoRespuestaSerializer(qs, many=True).data)
 
@@ -194,17 +173,22 @@ class SeguimientoComisionadoListCreateView(APIView):
             _log(usuario=user.email, rol=_rol(user), accion='SEGUIMIENTO_COMISIONADO',
                  ip=request.META.get('REMOTE_ADDR'), folio=fus.folio)
 
-            # Primera respuesta del comisionado: En_seguimiento → Atendido.
-            # A partir de aquí ya se puede confirmar "atendido" (ver
-            # AtendidoFUSSerializer) — respuestas siguientes no repiten esto.
-            if fus.estatusParticular_id == 'En_seguimiento':
-                fus.estatusParticular_id = 'Atendido'
-                fus.idUsuarioModifica = user.id
-                fus.save()
+            # Respuesta que "activa" el FUS -> Atendido: la primera tras ser
+            # comisionado (En_seguimiento) o la primera tras un rechazo
+            # (Rechazado — ya no se reabre solo con consultar, hace falta que
+            # el comisionado vuelva a responder). select_for_update evita que
+            # dos respuestas casi simultáneas disparen la transición dos veces.
+            fus_lock = FUS.objects.select_for_update().get(pk=fus.pk)
+            if fus_lock.estatusParticular_id in ('En_seguimiento', 'Rechazado'):
+                est_ant = fus_lock.estatusParticular_id
+                fus_lock.estatusParticular_id = 'Atendido'
+                fus_lock.idUsuarioModifica = user.id
+                fus_lock.save()
 
-                _log(usuario=user.email, rol=_rol(user), accion='ASIGNACION_ESTADO',
+                accion = 'REAPERTURA_FUS' if est_ant == 'Rechazado' else 'ASIGNACION_ESTADO'
+                _log(usuario=user.email, rol=_rol(user), accion=accion,
                      ip=request.META.get('REMOTE_ADDR'), folio=fus.folio,
-                     estado_ant='En_seguimiento', estado_nuevo='Atendido')
+                     estado_ant=est_ant, estado_nuevo='Atendido')
 
         return Response(SeguimientoRespuestaSerializer(seg).data, status=201)
 
@@ -257,7 +241,7 @@ class AtendidoFUSView(APIView):
 class ConcluirAsuntoView(APIView):
     """POST — validación final positiva. Exclusivo del Particular (ROL1) de
     la dirección del comisionado asignado."""
-    permission_classes = [IsAuthenticated, EsRol1DeLaDireccionComisionado]
+    permission_classes = [IsAuthenticated, EsRol1DuenoDelFUS]
 
     def post(self, request, pk):
         fus = get_object_or_404(FUS, pk=pk, activo=1)
@@ -277,6 +261,14 @@ class ConcluirAsuntoView(APIView):
             fus.fechaConclusion = timezone.now()
             fus.idUsuarioModifica = user.id
             fus.save()
+
+            # Si el FUS se turnó antes de comisionarse, Turnado.estatusTitular
+            # es el estatus que ve el Titular (Rol 2) en Solicitudes Turnadas
+            # — vive aparte de FUS.estatusParticular y hay que reflejarlo aquí
+            # también, o se queda pegado en "En_seguimiento" para siempre.
+            fus.turnados.filter(activo=1).exclude(estatusTitular_id='Concluido').update(
+                estatusTitular_id='Concluido', idUsuarioModifica=user.id
+            )
 
             _log(usuario=user.email, rol=_rol(user), accion='APROBACION_FUS',
                  ip=ip, folio=fus.folio, estado_ant=est_ant, estado_nuevo='Concluido')
@@ -301,12 +293,12 @@ class ConcluirAsuntoView(APIView):
 
 class RechazarSolicitudView(APIView):
     """POST {motivo} — validación final negativa: NO regresa directo a
-    seguimiento, queda en "Rechazado" hasta que quien tiene facultad de
-    comisionar (Rol 1 o el Rol 2 destinatario del Turnado) vuelva a consultarla
-    (ver SeguimientoComisionadoListCreateView.get, que dispara la reapertura
-    automática a En_seguimiento). Exclusivo del Particular (ROL1) de la
-    dirección del comisionado asignado."""
-    permission_classes = [IsAuthenticated, EsRol1DeLaDireccionComisionado]
+    seguimiento, queda visible en "Rechazado" hasta que el comisionado
+    registre una nueva respuesta (ver SeguimientoComisionadoListCreateView.post,
+    que en ese momento la reabre directo a "Atendido") — ya no se reabre solo
+    con que alguien la consulte. Exclusivo del Particular (ROL1) dueño de
+    este FUS."""
+    permission_classes = [IsAuthenticated, EsRol1DuenoDelFUS]
 
     def post(self, request, pk):
         fus = get_object_or_404(FUS, pk=pk, activo=1)

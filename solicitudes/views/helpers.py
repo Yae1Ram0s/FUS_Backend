@@ -1,9 +1,7 @@
-from django.contrib.auth.models import User
 from django.utils import timezone
 
-from autenticacion.models import CorreoAutorizado
 from ..helpers import _resolver_unidad_administrativa
-from ..utils import get_rol, log_bitacora
+from ..utils import get_rol, log_bitacora, _propietario_fus
 
 # _rol/_log se mantienen como alias locales para no tocar cada llamada existente.
 _rol = get_rol
@@ -28,20 +26,6 @@ def _primer_error(ser):
         if errores:
             return str(errores[0])
     return 'Datos inválidos.'
-
-
-def _propietario_fus(user):
-    """Usuario ROL1 dueño de los FUS que `user` puede operar: él mismo si es
-    ROL1, o el ROL1 que lo registró (CorreoAutorizado.idUsuarioRegistra) si es
-    EQUIPO_PARTICULAR. None si no aplica o el creador ya no es válido."""
-    rol = _rol(user)
-    if rol == 'ROL1':
-        return user
-    if rol == 'EQUIPO_PARTICULAR':
-        ca = CorreoAutorizado.objects.filter(email=user.email, activo=1).first()
-        if ca and ca.idUsuarioRegistra:
-            return User.objects.filter(pk=ca.idUsuarioRegistra, is_active=True).first()
-    return None
 
 
 def _metadata_generacion():

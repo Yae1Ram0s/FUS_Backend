@@ -1,7 +1,7 @@
 from rest_framework.permissions import BasePermission
 
 from autenticacion.models import CorreoAutorizado
-from .utils import get_rol
+from .utils import get_rol, _propietario_fus
 from .models import Turnado
 
 
@@ -13,13 +13,14 @@ def _unidad_id(user):
 
 
 def _es_rol1_o_turnado_destinatario(user, fus):
-    """Rol 1 (dueño del FUS, sin turnado de por medio) o Rol 2 que sea el
-    destinatario específico de un Turnado activo de este FUS — no "cualquier
-    Rol 2 de la dirección". Usado por: comisionar, atendido, y el gate de la
+    """Rol 1 dueño de ESTE FUS (o su asistente EQUIPO_PARTICULAR), sin
+    turnado de por medio, o Rol 2 que sea el destinatario específico de un
+    Turnado activo de este FUS — nunca "cualquier Rol 1/Rol 2", siempre
+    scoped al FUS puntual. Usado por: comisionar, atendido, y el gate de la
     reapertura automática Rechazado→En_seguimiento."""
     rol = get_rol(user)
-    if rol == 'ROL1':
-        return True
+    if rol in ('ROL1', 'EQUIPO_PARTICULAR'):
+        return _propietario_fus(user) == fus.idSolicitanteInterno
     if rol == 'ROL2':
         return Turnado.objects.filter(idFus=fus, idDestinatario=user, activo=1).exists()
     return False
@@ -35,31 +36,33 @@ class EsRol1oRol2(BasePermission):
 
 
 class EsRol1oTurnadoDestinatario(BasePermission):
-    """Rol 1, o Rol 2 destinatario específico del Turnado de este FUS. Usado
-    por: comisionar, atendido."""
+    """Rol 1 (o EQUIPO_PARTICULAR) dueño de este FUS, o Rol 2 destinatario
+    específico del Turnado de este FUS. Usado por: comisionar, atendido."""
     message = 'No autorizado.'
 
     def has_permission(self, request, view):
-        return get_rol(request.user) in ('ROL1', 'ROL2')
+        return get_rol(request.user) in ('ROL1', 'ROL2', 'EQUIPO_PARTICULAR')
 
     def has_object_permission(self, request, view, obj):
         return _es_rol1_o_turnado_destinatario(request.user, obj)
 
 
-class EsRol1DeLaDireccionComisionado(BasePermission):
-    """Solo Rol 1 (Particular), de la misma dirección/unidad del comisionado
-    asignado al FUS. Usado por: concluir_asunto, rechazar_asunto — la
-    validación final queda exclusiva del Particular, el Titular (ROL2) ya no
+class EsRol1DuenoDelFUS(BasePermission):
+    """Solo Rol 1 (Particular) dueño de ESTE FUS específico (quien lo
+    registró, o su asistente EQUIPO_PARTICULAR) — no "cualquier Rol 1 de la
+    dirección del comisionado": un FUS puede turnarse y comisionarse en una
+    unidad distinta a la de quien lo registró (esa unidad puede no tener
+    ningún Rol 1 propio, dejando la solicitud sin nadie que la valide).
+    Usado por: concluir_asunto, rechazar_solicitud — la validación final
+    queda exclusiva del dueño de la solicitud, el Titular (ROL2) ya no
     puede llamarlos."""
     message = 'No autorizado.'
 
     def has_permission(self, request, view):
-        return get_rol(request.user) == 'ROL1'
+        return get_rol(request.user) in ('ROL1', 'EQUIPO_PARTICULAR')
 
     def has_object_permission(self, request, view, obj):
-        if not obj.idComisionado_id:
-            return False
-        return _unidad_id(request.user) == _unidad_id(obj.idComisionado)
+        return _propietario_fus(request.user) == obj.idSolicitanteInterno
 
 
 class EsComisionado(BasePermission):
@@ -83,15 +86,18 @@ class EsComisionadoAsignado(BasePermission):
 
 
 class PuedeVerSeguimientoComisionado(BasePermission):
-    """GET seguimiento (historial): el Comisionado asignado, o Rol 1/Rol 2 de
-    la misma dirección del comisionado asignado."""
+    """GET seguimiento (historial): el Comisionado asignado, el Rol 1 dueño
+    de este FUS (o su asistente EQUIPO_PARTICULAR), o el Rol 2 destinatario
+    específico del Turnado — mismo criterio que comisionar/atendido, no
+    "cualquier Rol 1/Rol 2 de la dirección del comisionado" (esa unidad
+    puede no coincidir con la de quien registró o turnó el FUS)."""
     message = 'No autorizado.'
 
     def has_permission(self, request, view):
-        return get_rol(request.user) in ('ROL1', 'ROL2', 'COMISIONADO')
+        return get_rol(request.user) in ('ROL1', 'ROL2', 'COMISIONADO', 'EQUIPO_PARTICULAR')
 
     def has_object_permission(self, request, view, obj):
         rol = get_rol(request.user)
         if rol == 'COMISIONADO':
             return obj.idComisionado_id == request.user.id
-        return bool(obj.idComisionado_id) and _unidad_id(request.user) == _unidad_id(obj.idComisionado)
+        return _es_rol1_o_turnado_destinatario(request.user, obj)
