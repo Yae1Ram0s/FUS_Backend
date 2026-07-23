@@ -18,6 +18,13 @@ class ActividadListCreateView(APIView):
         mes = request.query_params.get('mes')  # 'YYYY-MM'
         qs = Actividad.objects.filter(
             Q(idCreador=request.user) | Q(participantes=request.user), activo=1
+        ).exclude(
+            # El recordatorio automático de "Vence FUS" (tipo='limite', creado
+            # al registrar/turnar con fechaLimite) deja de ser relevante una
+            # vez que el FUS ya se concluyó — mismo criterio que
+            # FUSSerializer.get_estadoTemporalidad. No afecta actividades que
+            # el usuario haya agendado él mismo.
+            tipo='limite', idFusRelacionado__estatusParticular_id='Concluido',
         ).distinct().select_related('idFusRelacionado').prefetch_related('participantes')
         if mes:
             qs = qs.filter(fecha__year=int(mes[:4]), fecha__month=int(mes[5:7]))

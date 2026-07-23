@@ -10,8 +10,11 @@ from rest_framework.permissions import IsAuthenticated
 
 from autenticacion.models import CorreoAutorizado
 from catalogos.models import MedioRecepcion
-from ..models import FUS, Turnado, Seguimiento, Notificacion, Actividad
-from ..serializers import TurnadoSerializer, TurnadoActividadSerializer, SeguimientoSerializer
+from ..models import FUS, Turnado, Seguimiento, Notificacion, Actividad, Bitacora, SeguimientoRespuesta
+from ..serializers import (
+    TurnadoSerializer, TurnadoActividadSerializer, SeguimientoSerializer,
+    SeguimientoComisionadoComoActividadSerializer,
+)
 from ..utils import resolver_nombre
 from ..helpers import notificar_por_correo
 from .helpers import _rol, _log, ROLES_PARTICULAR, _propietario_fus
@@ -144,22 +147,63 @@ class FUSActividadView(APIView):
         ).prefetch_related(
             'seguimientos',
         ).order_by('fechaHoraTurnado')
-        return Response(TurnadoActividadSerializer(turnados, many=True).data)
+
+        data = TurnadoActividadSerializer(turnados, many=True).data
+
+        if data:
+            # Si además de turnarse el FUS se comisionó, las respuestas reales
+            # viven en SeguimientoRespuesta (flujo de Comisionado), no en
+            # Seguimiento (flujo directo de Rol 2) — sin este merge, Rol 1
+            # vería "Pendiente de respuesta" aunque el comisionado ya haya
+            # respondido. `autorNombre` se completa con el destinatario del
+            # turnado (el Titular) — nunca con el comisionado real.
+            respuestas = SeguimientoComisionadoComoActividadSerializer(
+                fus.seguimientosComisionado.exclude(tipo='rechazo').order_by('fechaRegistro'), many=True
+            ).data if fus.idComisionado_id else []
+
+            # El motivo del rechazo (RechazarSolicitudView) siempre se guarda
+            # en SeguimientoRespuesta, haya o no comisionado — es la propia
+            # validación de Rol 1, no hay nada que disfrazar, así que se
+            # muestra igual con o sin comisionado de por medio.
+            rechazos = SeguimientoComisionadoComoActividadSerializer(
+                fus.seguimientosComisionado.filter(tipo='rechazo').order_by('fechaRegistro'), many=True
+            ).data
+            for item in rechazos:
+                item['descripcionActividad'] = f"Solicitud rechazada: {item['descripcionActividad']}"
+
+            if respuestas or rechazos:
+                for t in data:
+                    nombre_titular = (t.get('idDestinatario') or {}).get('nombre') or ''
+                    extra = (
+                        [{**item, 'autorNombre': nombre_titular} for item in respuestas] +
+                        [{**item, 'autorNombre': None} for item in rechazos]
+                    )
+                    t['seguimientos'] = sorted(t['seguimientos'] + extra, key=lambda s: s['fechaRegistro'])
+
+        return Response(data)
 
 
 class FUSTrazabilidadView(APIView):
-    """Línea de tiempo de un FUS (creación + turnados/respuestas). Sin restricción
-    de dueño a nivel de FUS: la usan tanto Consultar FUS como Bitácora, y en
-    Bitácora un ROL1 audita folios que no necesariamente son suyos.
+    """Línea de tiempo completa de un FUS: creación, turnado(s), comisión y
+    respuestas (tanto del flujo directo de Rol 2 como del de Comisionado),
+    rechazo y conclusión. Sin restricción de dueño a nivel de FUS: la usan
+    tanto Consultar FUS como Bitácora, y en Bitácora un ROL1 audita folios
+    que no necesariamente son suyos.
 
-    ROL2 solo ve su propia porción: el turnado que le corresponde a él (no los
-    de otros destinatarios) y sus respuestas/conclusión — nada de creación,
-    que es anterior a que el asunto le llegara."""
+    ROL2 solo ve su propia porción: el turnado que le corresponde a él (no
+    los de otros destinatarios) — nada de creación, que es anterior a que
+    el asunto le llegara. Rol 1/Equipo del Particular ven el comisionado y
+    sus respuestas como si las hubiera dado el Titular cuando el FUS se
+    turnó antes de comisionarse (mismo criterio que el detalle y el PDF) —
+    si Rol 1 comisionó directo, sin turnado de por medio, ve al comisionado
+    real (ya lo ve así en el resto de la pantalla)."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request, folio):
         fus = get_object_or_404(FUS, folio=folio, activo=1)
         rol = _rol(request.user)
+        es_rol2 = rol == 'ROL2'
+        tiene_turnado = fus.turnados.filter(activo=1).exists()
 
         eventos = []
 
@@ -167,7 +211,7 @@ class FUSTrazabilidadView(APIView):
             'idDestinatario'
         ).prefetch_related('seguimientos')
 
-        if rol == 'ROL2':
+        if es_rol2:
             turnados_qs = turnados_qs.filter(idDestinatario=request.user)
         elif fus.fechaRegistro:
             eventos.append({
@@ -189,6 +233,7 @@ class FUSTrazabilidadView(APIView):
                     'detalle': f'Turnado a {actor}' if actor else 'Turnado',
                 })
 
+            # Flujo directo (legacy, sin comisionado): respuestas del propio Titular.
             segs = [s for s in t.seguimientos.all() if s.activo]
             for i, s in enumerate(segs):
                 es_final = i == len(segs) - 1
@@ -200,12 +245,60 @@ class FUSTrazabilidadView(APIView):
                     'detalle': s.descripcionActividad,
                 })
 
+        # Flujo de Comisionado: asignación + respuestas reales. Ante Rol 1 o
+        # Equipo del Particular, disfrazadas como si las hubiera dado el
+        # Titular cuando el FUS se turnó antes de comisionarse.
+        disfrazar = (not es_rol2) and tiene_turnado
+        if fus.idComisionado_id:
+            nombre_comisionado = resolver_nombre(fus.idComisionado)
+            if disfrazar:
+                turnado_relevante = fus.turnados.filter(activo=1).select_related('idDestinatario').order_by('-fechaHoraTurnado').first()
+                actor_respuestas = resolver_nombre(turnado_relevante.idDestinatario) if turnado_relevante and turnado_relevante.idDestinatario else None
+            else:
+                actor_respuestas = nombre_comisionado
+
+                asignacion = Bitacora.objects.filter(fusFolio=fus.folio, accion='ASIGNACION_COMISIONADO').order_by('-fechaHora').first()
+                if asignacion:
+                    eventos.append({
+                        'tipo':    'comisionado',
+                        'fecha':   asignacion.fechaHora,
+                        'actor':   nombre_comisionado,
+                        'detalle': f'Comisionado asignado: {nombre_comisionado}' if nombre_comisionado else 'Comisionado asignado',
+                    })
+
+            TIPO_SEG_LABEL = dict(SeguimientoRespuesta.TIPO_CHOICES)
+            for s in fus.seguimientosComisionado.exclude(tipo='rechazo').order_by('fechaRegistro'):
+                eventos.append({
+                    'tipo':    'respuesta',
+                    'fecha':   s.fechaRegistro,
+                    'actor':   actor_respuestas,
+                    'detalle': f'{TIPO_SEG_LABEL.get(s.tipo, s.tipo)}: {s.contenido}',
+                })
+
+        # Validación final (Concluir/Rechazar asunto) — la ejecuta Rol 1 (o
+        # Equipo del Particular), pero afecta también el turnado de Rol 2.
+        # Se incluyen TODAS las ocurrencias (un FUS puede rechazarse,
+        # reabrirse con una nueva respuesta y rechazarse de nuevo), no solo
+        # la última — la idea es ver todo lo que pasó, no solo el final.
+        if fus.idComisionado_id or turnados:
+            for accion, tipo, detalle_defecto in (
+                ('APROBACION_FUS', 'concluido', 'Solicitud concluida'),
+                ('RECHAZO_FUS',    'rechazo',   'Solicitud rechazada'),
+            ):
+                for entrada in Bitacora.objects.filter(fusFolio=fus.folio, accion=accion).order_by('fechaHora'):
+                    eventos.append({
+                        'tipo':    tipo,
+                        'fecha':   entrada.fechaHora,
+                        'actor':   None,
+                        'detalle': entrada.observaciones or detalle_defecto,
+                    })
+
         eventos.sort(key=lambda e: e['fecha'])
 
         # Estado actual — para el punto "en vivo" del timeline. ROL2 ve el
         # estatus de su propio turnado (más reciente); ROL1 ve el estatus
         # general del FUS.
-        if rol == 'ROL2':
+        if es_rol2:
             estatus_actual = turnados[-1].estatusTitular_id if turnados else None
         else:
             estatus_actual = fus.estatusParticular_id
@@ -229,15 +322,18 @@ class MisTurnadosView(APIView):
         estatus = request.query_params.get('estatusTitular')
         search  = request.query_params.get('search')
         if estatus == 'Vencido':
-            qs = qs.filter(idFus__estatusParticular_id='Turnado', idFus__fechaLimite__lt=timezone.now())
+            # Indicador de temporalidad, no de estatus: por fechaLimite, sin
+            # importar en qué estatus del trámite esté el FUS — salvo
+            # Concluido, ya cerrado, donde la temporalidad deja de aplicar
+            # (mismo criterio que FUSSerializer.get_estadoTemporalidad).
+            qs = qs.filter(idFus__fechaLimite__lt=timezone.now()).exclude(idFus__estatusParticular_id='Concluido')
         elif estatus == 'PorVencer':
             from datetime import timedelta
             ahora = timezone.now()
             qs = qs.filter(
-                idFus__estatusParticular_id='Turnado',
                 idFus__fechaLimite__gte=ahora,
                 idFus__fechaLimite__lte=ahora + timedelta(hours=24),
-            )
+            ).exclude(idFus__estatusParticular_id='Concluido')
         elif estatus in ('Rechazado', 'Pendiente_validacion'):
             # Viven en FUS.estatusParticular, no en Turnado.estatusTitular —
             # el sidebar de ROL2 los ofrece bajo el mismo parámetro `estatusTitular`.
@@ -352,8 +448,36 @@ class SeguimientoListCreateView(APIView):
         turnado = get_object_or_404(Turnado, pk=turnado_id, activo=1)
         if turnado.idDestinatario_id != request.user.id:
             return Response({'detail': 'No autorizado.'}, status=403)
-        qs      = Seguimiento.objects.filter(idTurnado=turnado, activo=1).order_by('fechaRegistro')
-        return Response(SeguimientoSerializer(qs, many=True).data)
+
+        fus  = turnado.idFus
+        segs = list(Seguimiento.objects.filter(idTurnado=turnado, activo=1))
+
+        # El motivo del rechazo (RechazarSolicitudView) se guarda en
+        # SeguimientoRespuesta sin importar si hay comisionado o no — en el
+        # flujo directo (sin comisionado) no hay otro lugar donde el Titular
+        # lo vea, así que se fusiona aquí mismo, en "Respuestas y seguimiento".
+        rechazos = list(fus.seguimientosComisionado.filter(tipo='rechazo')) if not fus.idComisionado_id else []
+
+        # Se ordena por el datetime real (no por el string ya renderizado):
+        # comparar strings ISO con offsets de zona horaria distintos (UTC vs
+        # hora local) rompe el orden cronológico.
+        combinados = sorted(segs + rechazos, key=lambda o: o.fechaRegistro)
+
+        data = []
+        for o in combinados:
+            if isinstance(o, Seguimiento):
+                data.append(SeguimientoSerializer(o).data)
+            else:
+                data.append({
+                    'id': f'rc-{o.id}',
+                    'fechaActividad': timezone.localtime(o.fechaRegistro).date().isoformat(),
+                    'descripcionActividad': f'Solicitud rechazada: {o.contenido}',
+                    'accionTexto': None,
+                    'fechaRegistro': timezone.localtime(o.fechaRegistro).isoformat(),
+                    'esRechazo': True,
+                })
+
+        return Response(data)
 
     def post(self, request, turnado_id):
         turnado = get_object_or_404(Turnado, pk=turnado_id, activo=1)
@@ -385,31 +509,41 @@ class SeguimientoListCreateView(APIView):
 
         fus = turnado.idFus
 
-        # Transición Recibido → En_seguimiento (primera respuesta del titular)
-        if turnado.estatusTitular_id == 'Recibido':
+        # Respuesta que "activa" el FUS -> Atendido: la primera tras ser
+        # turnado (Recibido) o la primera tras un rechazo (Rechazado — ya no
+        # se reabre solo con consultar, hace falta que el Titular vuelva a
+        # responder). Mismo criterio que el flujo de Comisionado.
+        est_ant_turnado = turnado.estatusTitular_id
+        if est_ant_turnado in ('Recibido', 'Rechazado'):
             turnado.estatusTitular_id = 'En_seguimiento'
             turnado.idUsuarioModifica = user.id
             turnado.save()
 
-            # Transición FUS: Turnado → Atendido (cuando al menos un titular responde)
-            if fus.estatusParticular_id == 'Turnado':
+            if fus.estatusParticular_id in ('Turnado', 'Rechazado'):
+                est_ant_fus = fus.estatusParticular_id
                 fus.estatusParticular_id = 'Atendido'
                 fus.idUsuarioModifica = user.id
                 fus.save()
 
+                mensaje = (
+                    f"{nombre_titular} comenzó a atender el FUS {fus.folio}."
+                    if est_ant_turnado == 'Recibido' else
+                    f"{nombre_titular} volvió a responder el FUS {fus.folio} tras ser rechazado."
+                )
                 _notif = Notificacion.objects.create(
                     idDestinatario=fus.idSolicitanteInterno,
                     fusFolio=fus.folio,
                     tipoEvento='CAMBIO_ESTADO',
-                    mensaje=f"{nombre_titular} comenzó a atender el FUS {fus.folio}.",
+                    mensaje=mensaje,
                 )
                 _push_notificacion(_notif)
                 notificar_por_correo(_notif)
 
-                _log(usuario=user.email, rol=rol, accion='ASIGNACION_ESTADO',
+                accion = 'REAPERTURA_FUS' if est_ant_turnado == 'Rechazado' else 'ASIGNACION_ESTADO'
+                _log(usuario=user.email, rol=rol, accion=accion,
                      ip=ip, folio=fus.folio,
-                     estado_ant='Turnado', estado_nuevo='Atendido',
-                     obs=f'Primera respuesta registrada por {nombre_titular}')
+                     estado_ant=est_ant_fus, estado_nuevo='Atendido',
+                     obs=None if est_ant_turnado == 'Rechazado' else f'Primera respuesta registrada por {nombre_titular}')
         else:
             # Seguimientos posteriores — notificar al ROL1 cada nueva respuesta
             resumen = seg.descripcionActividad[:80]

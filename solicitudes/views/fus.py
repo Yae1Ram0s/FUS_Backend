@@ -18,9 +18,10 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 
 from autenticacion.models import CorreoAutorizado
 from catalogos.models import MedioRecepcion
-from ..models import FUS, Evidencia, Turnado, Actividad
+from ..models import FUS, Evidencia, Turnado, Actividad, SeguimientoRespuesta
 from ..serializers import FUSSerializer, TurnadoActividadSerializer
 from ..utils import resolver_nombre
+from ..helpers import _resolver_unidad_administrativa
 from .helpers import _rol, _log, _ROL_FOLIO, ROLES_PARTICULAR, _propietario_fus
 
 ALLOWED_MIME_TYPES = {
@@ -128,11 +129,15 @@ class FUSListCreateView(APIView):
         estatus = request.query_params.get('estatusParticular')
         search  = request.query_params.get('search')
         if estatus == 'Vencido':
-            qs = qs.filter(estatusParticular_id='Turnado', fechaLimite__lt=timezone.now())
+            # Indicador de temporalidad, no de estatus: por fechaLimite, sin
+            # importar en qué estatus del trámite esté el FUS — salvo
+            # Concluido, ya cerrado, donde la temporalidad deja de aplicar
+            # (mismo criterio que FUSSerializer.get_estadoTemporalidad).
+            qs = qs.filter(fechaLimite__lt=timezone.now()).exclude(estatusParticular_id='Concluido')
         elif estatus == 'PorVencer':
             from datetime import timedelta
             ahora = timezone.now()
-            qs = qs.filter(estatusParticular_id='Turnado', fechaLimite__gte=ahora, fechaLimite__lte=ahora + timedelta(hours=24))
+            qs = qs.filter(fechaLimite__gte=ahora, fechaLimite__lte=ahora + timedelta(hours=24)).exclude(estatusParticular_id='Concluido')
         elif estatus:
             qs = qs.filter(estatusParticular_id=estatus)
         if search:
@@ -399,9 +404,15 @@ class DescargarEvidenciaView(APIView):
 
 # ── Descargar FUS individual (PDF) ────────────────────────────────────────────
 
-def generar_pdf_fus(fus, incluir_imagenes=False):
+def generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL1'):
     """Construye el PDF de un FUS (usado tanto para la descarga directa como
-    para el adjunto en las notificaciones por correo). Devuelve los bytes."""
+    para el adjunto en las notificaciones por correo). Devuelve los bytes.
+
+    `rol_visor` determina qué ve cada quién, mismo criterio que la pantalla
+    de detalle: 'ROL1' (incluye EQUIPO_PARTICULAR) ve la sección "Se turnó"
+    y las respuestas como si las hubiera dado el Titular, sin exponer al
+    comisionado. 'ROL2' no ve "Se turnó" (ya lo hizo él) pero sí a su
+    comisionado real, con sus respuestas."""
     from reportlab.lib.pagesizes import letter
     from reportlab.platypus import (
         SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
@@ -434,7 +445,7 @@ def generar_pdf_fus(fus, incluir_imagenes=False):
     W = letter[0] - 4*cm  # ancho útil
 
     VERDE    = colors.black
-    AMARILLO = colors.HexColor('#FFFF00')
+    AMARILLO = colors.HexColor("#FFFD78")  # antes '#FFFF00' — mismo ámbar que usa el resto del sistema, menos intenso
     CLARO    = colors.white
     BORDE    = colors.black
 
@@ -564,68 +575,118 @@ def generar_pdf_fus(fus, incluir_imagenes=False):
     elements.append(KeepTogether(prioridad_bloque))
     elements.append(Spacer(1, 8))
 
-    # ── Se turnó ──
-    if turnados:
-        for i, t in enumerate(turnados):
-            dest_nombre = resolver_nombre(t.idDestinatario) if t.idDestinatario else '—'
-            turno_data = [
-                fila('Nombre',             dest_nombre),
-                fila('Medio de envío',     t.idMedio.nombreMedio if t.idMedio else '—'),
-                fila('Fecha y hora',       fmt(t.fechaHoraTurnado)),
-                fila('Texto de la solicitud', t.solicitudTexto or '—'),
+    TIPO_SEG_LABEL = dict(SeguimientoRespuesta.TIPO_CHOICES)
+
+    def _tabla_seg(rows, col1=3*cm):
+        t = Table(rows, colWidths=[col1, W - col1])
+        t.setStyle(TableStyle([
+            ('ROWBACKGROUNDS', (0,0), (-1,-1), [colors.white, CLARO]),
+            ('GRID',           (0,0), (-1,-1), 0.3, BORDE),
+            ('TOPPADDING',     (0,0), (-1,-1), 4),
+            ('BOTTOMPADDING',  (0,0), (-1,-1), 4),
+            ('LEFTPADDING',    (0,0), (-1,-1), 6),
+            ('RIGHTPADDING',   (0,0), (-1,-1), 6),
+            ('VALIGN',         (0,0), (-1,-1), 'TOP'),
+        ]))
+        return t
+
+    respuestas_comisionado = list(
+        fus.seguimientosComisionado.exclude(tipo='rechazo').order_by('fechaRegistro')
+    ) if fus.idComisionado_id else []
+
+    if rol_visor == 'ROL2':
+        # Rol 2 ya turnó él mismo — no tiene sentido mostrárselo. En cambio
+        # ve a su comisionado real (si lo hay) y sus respuestas, sin disfraz.
+        if fus.idComisionado_id:
+            com = fus.idComisionado
+            com_data = [
+                fila('Nombre',     resolver_nombre(com)),
+                fila('Correo',     com.email),
+                fila('Dirección',  _resolver_unidad_administrativa(com) or '—'),
             ]
-            tnt = Table(turno_data, colWidths=[4*cm, W - 4*cm])
-            tnt.setStyle(TableStyle([
-                ('ROWBACKGROUNDS', (0,0), (-1,-1), [colors.white, CLARO]),
-                ('GRID',           (0,0), (-1,-1), 0.3, BORDE),
-                ('TOPPADDING',     (0,0), (-1,-1), 4),
-                ('BOTTOMPADDING',  (0,0), (-1,-1), 4),
-                ('LEFTPADDING',    (0,0), (-1,-1), 6),
-                ('RIGHTPADDING',   (0,0), (-1,-1), 6),
-                ('VALIGN',         (0,0), (-1,-1), 'TOP'),
-            ]))
-            bloque = [seccion('SE TURNÓ'), Spacer(1, 4), tnt] if i == 0 else [tnt]
-            elements.append(KeepTogether(bloque))
-            elements.append(Spacer(1, 6))
+            elements.append(KeepTogether([seccion('COMISIONADO'), Spacer(1, 4), _tabla_seg(com_data, col1=4*cm)]))
+            elements.append(Spacer(1, 8))
 
-    # ── Respuesta y seguimiento ──
-    turnados_con_seguimiento = [
-        (t, [s for s in t.seguimientos.all() if s.activo]) for t in turnados
-    ]
-    turnados_con_seguimiento = [(t, segs) for t, segs in turnados_con_seguimiento if segs]
-
-    if turnados:
-        if turnados_con_seguimiento:
-            for i, (t, segs) in enumerate(turnados_con_seguimiento):
-                dest_nombre = resolver_nombre(t.idDestinatario) if t.idDestinatario else '—'
-                seg_rows = []
-                for s in segs:
-                    fecha_str = s.fechaActividad.strftime('%d/%m/%Y') if s.fechaActividad else '—'
-                    texto = s.descripcionActividad or '—'
-                    if s.accionTexto:
-                        texto += f'<br/>→ {s.accionTexto}'
-                    seg_rows.append([Paragraph(fecha_str, st_val), Paragraph(texto, st_val)])
-                segt = Table(seg_rows, colWidths=[3*cm, W - 3*cm])
-                segt.setStyle(TableStyle([
-                    ('ROWBACKGROUNDS', (0,0), (-1,-1), [colors.white, CLARO]),
-                    ('GRID',           (0,0), (-1,-1), 0.3, BORDE),
-                    ('TOPPADDING',     (0,0), (-1,-1), 4),
-                    ('BOTTOMPADDING',  (0,0), (-1,-1), 4),
-                    ('LEFTPADDING',    (0,0), (-1,-1), 6),
-                    ('RIGHTPADDING',   (0,0), (-1,-1), 6),
-                    ('VALIGN',         (0,0), (-1,-1), 'TOP'),
+            if respuestas_comisionado:
+                seg_rows = [
+                    [Paragraph(s.fechaRegistro.strftime('%d/%m/%Y %H:%M'), st_val),
+                     Paragraph(f'<b>{TIPO_SEG_LABEL.get(s.tipo, s.tipo)}:</b> {s.contenido}', st_val)]
+                    for s in respuestas_comisionado
+                ]
+                elements.append(KeepTogether([seccion('RESPUESTA Y SEGUIMIENTO'), Spacer(1, 4), _tabla_seg(seg_rows)]))
+            else:
+                elements.append(KeepTogether([
+                    seccion('RESPUESTA Y SEGUIMIENTO'), Spacer(1, 4),
+                    Paragraph('El comisionado aún no ha registrado respuestas.', st_val),
                 ]))
-                bloque = [Paragraph(dest_nombre, st_lbl), Spacer(1, 2), segt]
-                if i == 0:
+            elements.append(Spacer(1, 8))
+        elif turnados:
+            # Sin comisionado: el flujo directo, con sus propias respuestas.
+            turnados_con_seguimiento = [(t, [s for s in t.seguimientos.all() if s.activo]) for t in turnados]
+            turnados_con_seguimiento = [(t, segs) for t, segs in turnados_con_seguimiento if segs]
+            if turnados_con_seguimiento:
+                for i, (t, segs) in enumerate(turnados_con_seguimiento):
+                    seg_rows = []
+                    for s in segs:
+                        fecha_str = s.fechaActividad.strftime('%d/%m/%Y') if s.fechaActividad else '—'
+                        texto = s.descripcionActividad or '—'
+                        if s.accionTexto:
+                            texto += f'<br/>→ {s.accionTexto}'
+                        seg_rows.append([Paragraph(fecha_str, st_val), Paragraph(texto, st_val)])
+                    bloque = [_tabla_seg(seg_rows)] if i > 0 else [seccion('RESPUESTA Y SEGUIMIENTO'), Spacer(1, 4), _tabla_seg(seg_rows)]
+                    elements.append(KeepTogether(bloque))
+                    elements.append(Spacer(1, 8))
+            else:
+                elements.append(KeepTogether([
+                    seccion('RESPUESTA Y SEGUIMIENTO'), Spacer(1, 4),
+                    Paragraph('Pendiente de respuesta.', st_val),
+                ]))
+                elements.append(Spacer(1, 8))
+
+    else:  # ROL1 (incluye EQUIPO_PARTICULAR): ve "Se turnó" y las respuestas
+           # como si las hubiera dado el Titular, sin exponer al comisionado.
+        if turnados:
+            for i, t in enumerate(turnados):
+                dest_nombre = resolver_nombre(t.idDestinatario) if t.idDestinatario else '—'
+                turno_data = [
+                    fila('Nombre',             dest_nombre),
+                    fila('Medio de envío',     t.idMedio.nombreMedio if t.idMedio else '—'),
+                    fila('Fecha y hora',       fmt(t.fechaHoraTurnado)),
+                    fila('Texto de la solicitud', t.solicitudTexto or '—'),
+                ]
+                bloque = [seccion('SE TURNÓ'), Spacer(1, 4), _tabla_seg(turno_data, col1=4*cm)] if i == 0 else [_tabla_seg(turno_data, col1=4*cm)]
+                elements.append(KeepTogether(bloque))
+                elements.append(Spacer(1, 6))
+
+            algun_bloque = False
+            for t in turnados:
+                dest_nombre = resolver_nombre(t.idDestinatario) if t.idDestinatario else '—'
+                propias = [s for s in t.seguimientos.all() if s.activo]
+                seg_rows = [
+                    [Paragraph(s.fechaActividad.strftime('%d/%m/%Y') if s.fechaActividad else '—', st_val),
+                     Paragraph((s.descripcionActividad or '—') + (f'<br/>→ {s.accionTexto}' if s.accionTexto else ''), st_val)]
+                    for s in propias
+                ]
+                seg_rows += [
+                    [Paragraph(s.fechaRegistro.strftime('%d/%m/%Y'), st_val),
+                     Paragraph(f'<b>{TIPO_SEG_LABEL.get(s.tipo, s.tipo)}:</b> {s.contenido}', st_val)]
+                    for s in respuestas_comisionado
+                ]
+                if not seg_rows:
+                    continue
+                bloque = [Paragraph(dest_nombre, st_lbl), Spacer(1, 2), _tabla_seg(seg_rows)]
+                if not algun_bloque:
                     bloque = [seccion('RESPUESTA Y SEGUIMIENTO'), Spacer(1, 4)] + bloque
+                    algun_bloque = True
                 elements.append(KeepTogether(bloque))
                 elements.append(Spacer(1, 8))
-        else:
-            elements.append(KeepTogether([
-                seccion('RESPUESTA Y SEGUIMIENTO'), Spacer(1, 4),
-                Paragraph('Pendiente de respuesta del titular.', st_val),
-            ]))
-            elements.append(Spacer(1, 8))
+
+            if not algun_bloque:
+                elements.append(KeepTogether([
+                    seccion('RESPUESTA Y SEGUIMIENTO'), Spacer(1, 4),
+                    Paragraph('Pendiente de respuesta del titular.', st_val),
+                ]))
+                elements.append(Spacer(1, 8))
 
     # ── Pie ──
     elements.append(Spacer(1, 12))
@@ -685,8 +746,27 @@ class DescargarFUSPDFView(APIView):
             from rest_framework.response import Response
             return Response({'detail': 'FUS no encontrado.'}, status=404)
 
+        rol = _rol(request.user)
+        # Mismo criterio de visibilidad que FUSListCreateView: Rol 1 ve y
+        # descarga cualquier FUS (es quien está más arriba en la jerarquía,
+        # no solo los que él mismo registró). Equipo del Particular queda
+        # acotado al Rol 1 que lo dio de alta, y Rol 2 a los FUS que le
+        # turnaron a él específicamente.
+        if rol == 'ROL1':
+            autorizado = True
+        elif rol == 'EQUIPO_PARTICULAR':
+            autorizado = _propietario_fus(request.user) == fus.idSolicitanteInterno
+        elif rol == 'ROL2':
+            autorizado = Turnado.objects.filter(idFus=fus, idDestinatario=request.user, activo=1).exists()
+        else:
+            autorizado = False
+        if not autorizado:
+            from rest_framework.response import Response
+            return Response({'detail': 'No autorizado.'}, status=403)
+
+        rol_visor = 'ROL2' if rol == 'ROL2' else 'ROL1'
         incluir_imagenes = request.query_params.get('imagenes') == '1'
-        pdf_bytes = generar_pdf_fus(fus, incluir_imagenes=incluir_imagenes)
+        pdf_bytes = generar_pdf_fus(fus, incluir_imagenes=incluir_imagenes, rol_visor=rol_visor)
         resp = HttpResponse(pdf_bytes, content_type='application/pdf')
         nombre = fus.folio.replace('/', '-')
         resp['Content-Disposition'] = f'attachment; filename="FUS_{nombre}.pdf"'

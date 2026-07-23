@@ -73,13 +73,14 @@ def _parse_fecha_local(fecha_str, fin_de_dia=False):
 
 
 def _aplicar_filtros_bitacora(qs, params, rol):
-    usuario     = params.get('usuario')
-    accion      = params.get('accion')
-    folio       = params.get('folio')
-    nombre      = params.get('nombre')
-    estatus_fus = params.get('estatus_fus')
-    fecha_desde = params.get('fecha_desde')
-    fecha_hasta = params.get('fecha_hasta')
+    usuario      = params.get('usuario')
+    accion       = params.get('accion')
+    folio        = params.get('folio')
+    nombre       = params.get('nombre')
+    estatus_fus  = params.get('estatus_fus')
+    unidad_ids   = params.getlist('unidadAdministrativa')
+    fecha_desde  = params.get('fecha_desde')
+    fecha_hasta  = params.get('fecha_hasta')
 
     q = params.get('q')
     if q:
@@ -96,6 +97,15 @@ def _aplicar_filtros_bitacora(qs, params, rol):
     if nombre and rol == 'ROL1':
         emails = CorreoAutorizado.objects.filter(nombre__icontains=nombre).values_list('email', flat=True)
         qs = qs.filter(usuario__in=list(emails))
+
+    if unidad_ids:
+        unidad_ids_int = [int(uid) for uid in unidad_ids if str(uid).isdigit()]
+        if unidad_ids_int:
+            emails_unidad = CorreoAutorizado.objects.filter(
+                unidadAdministrativa_id__in=unidad_ids_int,
+                activo=1,
+            ).values_list('email', flat=True)
+            qs = qs.filter(usuario__in=list(emails_unidad))
 
     if estatus_fus == 'Vencido':
         folios = FUS.objects.filter(estatusParticular_id='Turnado', fechaLimite__lt=timezone.now()).values_list('folio', flat=True)

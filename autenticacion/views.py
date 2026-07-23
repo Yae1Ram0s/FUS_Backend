@@ -228,7 +228,18 @@ class LoginView(APIView):
         try:
             django_user = User.objects.get(email=email)
         except User.DoesNotExist:
-            return Response({'detail': 'Usuario no registrado. Contacta al administrador.'}, status=status.HTTP_401_UNAUTHORIZED)
+            # Correo autorizado (CorreoAutorizado) pero la persona nunca
+            # completó la activación de su cuenta (verificar-correo → OTP →
+            # establecer-contraseña), así que no existe su User todavía.
+            # `code` le permite al frontend reencauzar automáticamente al
+            # flujo de activación en vez de dejarlo varado en un mensaje.
+            return Response(
+                {
+                    'detail': 'Tu cuenta aún no está activada. Te reenviamos un código a tu correo para crear tu contraseña.',
+                    'code': 'cuenta_no_activada',
+                },
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
 
         user = authenticate(request, username=django_user.username, password=password)
         if not user:

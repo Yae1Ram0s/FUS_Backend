@@ -227,6 +227,13 @@ class AtendidoFUSView(APIView):
             fus.idUsuarioModifica = user.id
             fus.save()
 
+            # Mismo espejo que Concluir/Rechazar: sin esto, Turnado.estatusTitular
+            # se queda pegado en "En_seguimiento" para el Titular aunque el FUS ya
+            # esté Pendiente de validación.
+            fus.turnados.filter(activo=1).exclude(estatusTitular_id='Pendiente_validacion').update(
+                estatusTitular_id='Pendiente_validacion', idUsuarioModifica=user.id
+            )
+
             _log(usuario=user.email, rol=rol, accion='ATENCION_FUS',
                  ip=ip, folio=fus.folio, estado_ant=est_ant, estado_nuevo='Pendiente_validacion')
 

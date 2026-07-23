@@ -5,92 +5,90 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Código de verificación</title>
 </head>
-<body style="margin:0; padding:24px; background-color:#f4f6f5; font-family: Arial, Helvetica, sans-serif;">
+<body style="margin:0; padding:24px; background-color:#f4f6f5; font-family:Arial, Helvetica, sans-serif;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
     <tr>
       <td align="center">
-        <table role="presentation" width="720adding="0" cellspacing="0" style="max-width:900px;width:100%;">
+        <table role="presentation" width="720" cellpadding="0" cellspacing="0" style="max-width:720px; width:100%;">
           <tr>
-            <!-- La pleca vive DENTRO de la tarjeta (fondo del propio td, no
-                 del wrapper exterior): degradado gris claro por debajo +
-                 la marca de agua encima, una sola imagen completa (sin
-                 mosaico/repetición — background-size:cover) que cubre toda
-                 la tarjeta. background-image acepta varias capas separadas
-                 por coma; la primera queda arriba. Tiene soporte parejo en
-                 Gmail/Apple Mail/Outlook.com; Outlook de escritorio (Word)
-                 ignora ambas capas y cae al background-color sólido — no
-                 rompe nada, solo pierde el degradado y el patrón. -->
-            <td background="cid:pleca_watermark" style="background-color:#f4f5f4; background-image:url('cid:pleca_watermark'), linear-gradient(135deg, #ffffff 0%, #eceeed 100%); background-repeat:no-repeat, no-repeat; background-position:center, center; background-size:cover, 100% 100%; border:4px solid #c4c9c6; border-radius:20px; padding:44px 52px; box-shadow:0 18px 45px rgba(20,40,32,0.08);">
-
-              <!-- ── Encabezado ── -->
-              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+            <td align="center" style="padding:0 12px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse; background-color:#ffffff; border:1px solid #c4c9c6; border-radius:20px; box-shadow:0 18px 45px rgba(20,40,32,0.08);">
                 <tr>
-                  <td style="vertical-align:middle;">
-                    <table role="presentation" cellpadding="0" cellspacing="0">
+                  <td style="padding:32px 30px 28px;">
+
+                    <!-- Encabezado -->
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
                       <tr>
-                        <td style="vertical-align:middle; padding-right:12px;">
-                          <img src="cid:logo_scs" width="75" height="75" alt="SCS" style="display:block; border-radius:10px;">
+                        <td style="vertical-align:middle;">
+                          <table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+                            <tr>
+                              <td style="vertical-align:middle; padding-right:12px;">
+                                <img src="cid:logo_scs" width="75" height="75" alt="SCS" style="display:block; border-radius:10px;">
+                              </td>
+                              <td style="vertical-align:middle; white-space:nowrap;">
+                                <span style="font-size:19px; font-weight:700; color:#1a2f28; font-family:Arial, Helvetica, sans-serif;">SISTEMA DE CONTROL DE SOLICITUDES</span>
+                              </td>
+                            </tr>
+                          </table>
                         </td>
-                        <td style="vertical-align:middle; white-space:nowrap;">
-                          <span style="font-size:19px; font-weight:700; color:#1a2f28; font-family: Arial, Helvetica, sans-serif; white-space:nowrap;">SISTEMA DE CONTROL DE SOLICITUDES</span>
+                        <td align="right" style="vertical-align:middle; white-space:nowrap;">
+                          <img src="cid:logo_hacienda" height="38" alt="Hacienda | Aduanas" style="display:block;">
                         </td>
                       </tr>
                     </table>
-                  </td>
-                  <td align="right" style="vertical-align:middle; white-space:nowrap;">
-                    <img src="cid:logo_hacienda" height="38" alt="Hacienda | Aduanas" style="display:block;">
+
+                    <div style="border-top:1px solid #eeeeee; margin:24px 0;"></div>
+
+                    <!-- Cuerpo -->
+                    <p style="font-size:14px; color:#333333; margin:0 0 4px; font-family:Arial, Helvetica, sans-serif;"><strong>Estimado/a usuario/a:</strong></p>
+                    <p style="font-size:14px; color:#333333; line-height:1.6; margin:0 0 26px; font-family:Arial, Helvetica, sans-serif;">
+                      {{ intro }}
+                    </p>
+
+                    <p style="text-align:center; font-size:15px; font-weight:700; color:#235b4e; margin:0 0 16px; letter-spacing:0.3px; font-family:Arial, Helvetica, sans-serif;">
+                      Código de verificación
+                    </p>
+
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse; margin:0 auto;">
+                      <tr>
+                        <td align="center" style="padding:0 10px;">
+                          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse; max-width:520px; background-color:#3f6e60; border-radius:999px;" bgcolor="#3f6e60">
+                            <tr>
+                              <td style="padding:18px 24px; text-align:center; color:#ffffff; font-family:Arial, Helvetica, sans-serif;">
+                                <p style="font-size:12px; line-height:18px; margin:0 0 10px; font-weight:700; letter-spacing:0.2px;">
+                                  Válido por 15 minutos. Uso único
+                                </p>
+                                <p style="font-size:32px; line-height:40px; margin:0; font-weight:800; letter-spacing:8px;">
+                                  {{ codigo }}
+                                </p>
+                              </td>
+                            </tr>
+                          </table>
+                        </td>
+                      </tr>
+                    </table>
+
+                    <p style="text-align:center; font-size:12px; color:#8a8a8a; line-height:1.5; margin:26px 0 2px; font-family:Arial, Helvetica, sans-serif;">
+                      Si no has solicitado este código, por favor ignora este correo o contacta a soporte técnico.
+                    </p>
+                    <p style="text-align:center; font-size:12px; color:#8a8a8a; margin:0 0 20px; font-family:Arial, Helvetica, sans-serif;">
+                      Este es un correo automático, por favor no respondas
+                    </p>
+
+                    <p style="text-align:center; font-size:11px; color:#aaaaaa; margin:0 0 24px; font-family:Arial, Helvetica, sans-serif;">
+                      © 2026 Agencia Nacional de Aduanas de México - Eje Central
+                    </p>
+
+                    <div style="border-top:1px solid #eeeeee; margin:0 0 16px;"></div>
+
+                    <p style="font-size:10.5px; font-weight:700; color:#666666; margin:0 0 6px; font-family:Arial, Helvetica, sans-serif;">Leyenda de Confidencialidad</p>
+                    <p style="font-size:9.5px; color:#999999; line-height:1.5; margin:0; font-family:Arial, Helvetica, sans-serif;">
+                      De conformidad con el inciso a) del Artículo 57 del &ldquo;Acuerdo por el que se emiten las políticas y disposiciones para impulsar el uso y aprovechamiento de la informática, el gobierno digital, las tecnologías de la información y comunicación, y la seguridad de la información en la Administración Pública Federal&rdquo; publicado en el Diario Oficial de la Federación el 6 de septiembre del 2021. La información contenida en correos institucionales, es de carácter confidencial y su tratamiento es con estricta observancia a los principios de licitud, finalidad, lealtad, consentimiento, calidad, proporcionalidad, información y responsabilidad establecidos en la Ley General de Protección de Datos Personales en Posesión de Sujetos Obligados.
+                    </p>
+
                   </td>
                 </tr>
               </table>
-
-              <div style="border-top:1px solid #eeeeee; margin:24px 0;"></div>
-
-              <!-- ── Cuerpo ── -->
-              <p style="font-size:14px; color:#333333; margin:0 0 4px; font-family: Arial, Helvetica, sans-serif;"><strong>Estimado/a usuario/a:</strong></p>
-              <p style="font-size:14px; color:#333333; line-height:1.6; margin:0 0 26px; font-family: Arial, Helvetica, sans-serif;">
-                {{ intro }}
-              </p>
-
-              <p style="text-align:center; font-size:15px; font-weight:700; color:#235b4e; margin:0 0 16px; letter-spacing:0.3px; font-family: Arial, Helvetica, sans-serif;">
-                Código de verificación
-              </p>
-
-              <!-- Glassmorphism real (blur de lo que hay detrás: la pleca +
-                   el degradado de la tarjeta) en clientes WebKit; en
-                   Gmail/Outlook, que ignoran backdrop-filter, degrada a la
-                   píldora verde translúcida sin blur — sigue leyéndose
-                   bien, solo pierde el desenfoque. -->
-              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
-                <tr>
-                  <td style="background-color:rgba(35,91,78,0.82); -webkit-backdrop-filter:blur(16px) saturate(1.6); backdrop-filter:blur(16px) saturate(1.6); border:1px solid rgba(255,255,255,0.35); border-radius:999px; padding:18px 24px; text-align:center;">
-                    <span style="display:block; color:#ffffff; font-size:11.5px; font-weight:700; letter-spacing:0.3px; margin-bottom:6px; font-family: Arial, Helvetica, sans-serif;">
-                      Válido por 15 minutos. Uso único
-                    </span>
-                    <span style="display:block; color:#ffffff; font-size:30px; font-weight:800; letter-spacing:8px; font-family: Arial, Helvetica, sans-serif;">
-                      {{ codigo }}
-                    </span>
-                  </td>
-                </tr>
-              </table>
-
-              <p style="text-align:center; font-size:12px; color:#8a8a8a; line-height:1.5; margin:26px 0 2px; font-family: Arial, Helvetica, sans-serif;">
-                Si no has solicitado este código, por favor ignora este correo o contacta a soporte técnico.
-              </p>
-              <p style="text-align:center; font-size:12px; color:#8a8a8a; margin:0 0 20px; font-family: Arial, Helvetica, sans-serif;">
-                Este es un correo automático, por favor no respondas
-              </p>
-
-              <p style="text-align:center; font-size:11px; color:#aaaaaa; margin:0 0 24px; font-family: Arial, Helvetica, sans-serif;">
-                © 2026 Agencia Nacional de Aduanas de México - Eje Central
-              </p>
-
-              <div style="border-top:1px solid #eeeeee; margin:0 0 16px;"></div>
-
-              <p style="font-size:10.5px; font-weight:700; color:#666666; margin:0 0 6px; font-family: Arial, Helvetica, sans-serif;">Leyenda de Confidencialidad</p>
-              <p style="font-size:9.5px; color:#999999; line-height:1.5; margin:0; font-family: Arial, Helvetica, sans-serif;">
-                De conformidad con el inciso a) del Artículo 57 del &ldquo;Acuerdo por el que se emiten las políticas y disposiciones para impulsar el uso y aprovechamiento de la informática, el gobierno digital, las tecnologías de la información y comunicación, y la seguridad de la información en la Administración Pública Federal&rdquo; publicado en el Diario Oficial de la Federación el 6 de septiembre del 2021. La información contenida en correos institucionales, es de carácter confidencial y su tratamiento es con estricta observancia a los principios de licitud, finalidad, lealtad, consentimiento, calidad, proporcionalidad, información y responsabilidad establecidos en la Ley General de Protección de Datos Personales en Posesión de Sujetos Obligados.
-              </p>
-
             </td>
           </tr>
         </table>

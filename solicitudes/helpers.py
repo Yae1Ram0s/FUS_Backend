@@ -74,7 +74,7 @@ def notificar_por_correo(notificacion):
             ).prefetch_related(
                 'evidencias', 'turnados__idDestinatario', 'turnados__idMedio', 'turnados__seguimientos'
             ).get(folio=notificacion.fusFolio, activo=1)
-            pdf_bytes = generar_pdf_fus(fus, incluir_imagenes=False)
+            pdf_bytes = generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL2' if rol == 'ROL2' else 'ROL1')
             email.attach(f'FUS_{fus.folio.replace("/", "-")}.pdf', pdf_bytes, 'application/pdf')
         except Exception:
             logger.exception(f"No se pudo adjuntar el PDF del FUS {notificacion.fusFolio} al correo")

@@ -39,6 +39,7 @@ class FUSSerializer(serializers.ModelSerializer):
     estatusParticular    = serializers.CharField(source='estatusParticular_id', read_only=True)
     slaVencido           = serializers.SerializerMethodField()
     slaPorVencer         = serializers.SerializerMethodField()
+    estadoTemporalidad   = serializers.SerializerMethodField()
     direccionComisionado = serializers.SerializerMethodField()
     tieneTurnado         = serializers.SerializerMethodField()
 
@@ -49,7 +50,7 @@ class FUSSerializer(serializers.ModelSerializer):
             'descripcion', 'contexto', 'idMedioRecepcion', 'medioEspecificacion',
             'prioridad', 'criterios', 'estatusParticular', 'fechaConclusion',
             'nombreExterno', 'telefonoExterno', 'correoExterno', 'evidencias',
-            'fechaLimite', 'slaVencido', 'slaPorVencer',
+            'fechaLimite', 'slaVencido', 'slaPorVencer', 'estadoTemporalidad',
             'idComisionado', 'fechaAsignacion', 'direccionComisionado', 'tieneTurnado',
         ]
 
@@ -78,11 +79,52 @@ class FUSSerializer(serializers.ModelSerializer):
         faltante = obj.fechaLimite - timezone.now()
         return timedelta(0) < faltante <= timedelta(hours=24)
 
+    def get_estadoTemporalidad(self, obj):
+        # Indicador secundario de temporalidad, independiente del estatus del
+        # trámite (a diferencia de slaVencido/slaPorVencer, que solo aplican
+        # en 'Turnado'). Misma ventana de aviso (24h). No es un estado nuevo
+        # del flujo: null | 'Vencido' | 'PorVencer'. Una vez Concluido ya no
+        # aplica: el trámite está cerrado, la temporalidad deja de importar.
+        from datetime import timedelta
+        from django.utils import timezone
+        if not obj.fechaLimite or obj.estatusParticular_id == 'Concluido':
+            return None
+        ahora = timezone.now()
+        if ahora > obj.fechaLimite:
+            return 'Vencido'
+        if obj.fechaLimite - ahora <= timedelta(hours=24):
+            return 'PorVencer'
+        return None
+
 
 class SeguimientoSerializer(serializers.ModelSerializer):
     class Meta:
         model  = Seguimiento
         fields = ['id', 'fechaActividad', 'descripcionActividad', 'accionTexto', 'fechaRegistro']
+
+
+class SeguimientoComisionadoComoActividadSerializer(serializers.Serializer):
+    """Reexpone SeguimientoRespuesta (flujo de Comisionado) con las mismas
+    claves que SeguimientoSerializer (flujo directo de Rol 2), más `tipo`,
+    para fusionarlas en el timeline de FUSActividadView — de cara a Rol 1 es
+    como si el Titular hubiera respondido directo: `autorNombre` lo completa
+    la vista con el nombre del destinatario del turnado, nunca el del
+    comisionado real."""
+    id                   = serializers.SerializerMethodField()
+    tipo                 = serializers.CharField()
+    fechaActividad       = serializers.SerializerMethodField()
+    descripcionActividad = serializers.CharField(source='contenido')
+    accionTexto          = serializers.SerializerMethodField()
+    fechaRegistro        = serializers.DateTimeField()
+
+    def get_id(self, obj):
+        return f'cr-{obj.id}'
+
+    def get_fechaActividad(self, obj):
+        return obj.fechaRegistro.date()
+
+    def get_accionTexto(self, obj):
+        return ''
 
 
 class SeguimientoRespuestaSerializer(serializers.ModelSerializer):
