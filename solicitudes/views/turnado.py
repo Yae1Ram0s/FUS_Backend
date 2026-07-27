@@ -319,8 +319,11 @@ class MisTurnadosView(APIView):
             'idRemitente', 'idMedio',
         )
 
-        estatus = request.query_params.get('estatusTitular')
-        search  = request.query_params.get('search')
+        estatus   = request.query_params.get('estatusTitular')
+        prioridad = request.query_params.get('prioridad')
+        search    = request.query_params.get('search')
+        if prioridad:
+            qs = qs.filter(idFus__prioridad=prioridad)
         if estatus == 'Vencido':
             # Indicador de temporalidad, no de estatus: por fechaLimite, sin
             # importar en qué estatus del trámite esté el FUS — salvo
@@ -561,7 +564,14 @@ class SeguimientoListCreateView(APIView):
         _log(usuario=user.email, rol=rol, accion='REGISTRO_RESPUESTA',
              ip=ip, folio=fus.folio)
 
-        return Response(SeguimientoSerializer(seg).data, status=status.HTTP_201_CREATED)
+        # Se incluye el estatus vigente del turnado/FUS tras esta respuesta
+        # para que el frontend pueda refrescar el botón "Atendido" (visible
+        # para Rol 2 en AccionesValidacion) sin depender de un GET aparte —
+        # Rol 2 no tiene acceso a FUSDetailView (es solo para Rol 1).
+        data = SeguimientoSerializer(seg).data
+        data['estatusParticular'] = fus.estatusParticular_id
+        data['estatusTitular']    = turnado.estatusTitular_id
+        return Response(data, status=status.HTTP_201_CREATED)
 
 
 class SeguimientoDeleteView(APIView):
@@ -581,4 +591,8 @@ class SeguimientoDeleteView(APIView):
 
         seg.activo = 0
         seg.save()
+
+        _log(usuario=request.user.email, rol=_rol(request.user), accion='ELIMINACION',
+             ip=request.META.get('REMOTE_ADDR'), folio=seg.idTurnado.idFus.folio,
+             obs=f'Eliminó la respuesta/seguimiento del {seg.fechaActividad}: "{seg.descripcionActividad}"')
         return Response(status=status.HTTP_204_NO_CONTENT)

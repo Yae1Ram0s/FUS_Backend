@@ -1,8 +1,15 @@
-"""Notifica a ROL1/ROL2 los FUS turnados cuyo SLA (fechaLimite) está por
-vencer (dentro de las próximas 24h).
+"""Notifica a ROL1/ROL2 los FUS activos cuyo límite de respuesta (fechaLimite)
+está por vencer — no solo turnados, cualquier FUS con fechaLimite (mismo
+criterio de aplicabilidad que estadoTemporalidad en FUSSerializer).
+
+Ventana de aviso, según qué tan lejos esté el límite:
+  - Límite el mismo día calendario (hoy): se avisa cuando falten <= 2 horas.
+  - Límite en un día futuro: se avisa cuando falte <= 1 día completo.
 
 Este comando NO se agenda solo — debe correr periódicamente vía un
-scheduler externo (Railway Cron Jobs, cron del servidor, etc.). Ejecutar
+scheduler externo (Railway Cron Jobs, cron del servidor, etc.). Para que la
+ventana de 2h en FUS con límite hoy no se salte entre corridas, debe correr
+con una frecuencia menor a esas 2 horas (ideal: cada 15-30 min). Ejecutar
 manualmente con:
 
     python manage.py revisar_sla
@@ -18,18 +25,34 @@ from solicitudes.helpers import notificar_por_correo
 
 
 class Command(BaseCommand):
-    help = 'Notifica a ROL1/ROL2 los FUS turnados cuyo SLA está por vencer (<=24h).'
+    help = 'Notifica los FUS cuyo límite de respuesta está por vencer (hoy: <=2h, día futuro: <=1 día).'
 
     def handle(self, *args, **options):
         ahora = timezone.now()
+        hoy = timezone.localtime(ahora).date()
 
-        candidatos = FUS.objects.filter(
+        base = FUS.objects.filter(
             activo=1,
-            estatusParticular_id='Turnado',
             fechaLimite__isnull=False,
+        ).exclude(estatusParticular_id='Concluido')
+
+        # Límite hoy mismo (día calendario, hora local) — ventana corta de 2h.
+        candidatos_hoy = base.filter(
+            fechaLimite__date=hoy,
             fechaLimite__gt=ahora,
-            fechaLimite__lte=ahora + timedelta(hours=24),
+            fechaLimite__lte=ahora + timedelta(hours=2),
         )
+
+        # Límite en un día futuro — ventana de 1 día completo.
+        candidatos_futuro = base.exclude(fechaLimite__date=hoy).filter(
+            fechaLimite__gt=ahora,
+            fechaLimite__lte=ahora + timedelta(days=1),
+        )
+
+        # dict por id evita duplicados si un FUS calificara por ambas listas
+        # (no debería pasar dado que son mutuamente excluyentes por fecha,
+        # pero es una salvaguarda barata).
+        candidatos = {f.id: f for f in list(candidatos_hoy) + list(candidatos_futuro)}.values()
 
         creadas = 0
         for fus in candidatos:

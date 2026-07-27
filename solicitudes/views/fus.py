@@ -126,8 +126,11 @@ class FUSListCreateView(APIView):
             propietario = _propietario_fus(request.user)
             qs = qs.filter(idSolicitanteInterno=propietario) if propietario else qs.none()
 
-        estatus = request.query_params.get('estatusParticular')
-        search  = request.query_params.get('search')
+        estatus   = request.query_params.get('estatusParticular')
+        prioridad = request.query_params.get('prioridad')
+        search    = request.query_params.get('search')
+        if prioridad:
+            qs = qs.filter(prioridad=prioridad)
         if estatus == 'Vencido':
             # Indicador de temporalidad, no de estatus: por fechaLimite, sin
             # importar en qué estatus del trámite esté el FUS — salvo
@@ -306,6 +309,7 @@ class FUSDetailView(APIView):
         if 'fechaLimite' in data:         fus.fechaLimite = data.get('fechaLimite') or None
         fus.idUsuarioModifica = user.id
         fus.save()
+        fus.refresh_from_db()
 
         err_resp = _guardar_evidencias(fus, request, user)
         if err_resp:
@@ -355,6 +359,19 @@ class FUSDetalleAuditoriaView(APIView):
                     'autor': autor,
                     'texto': s.descripcionActividad,
                 })
+
+        # Respuestas del Comisionado (SeguimientoRespuesta) — feed aparte del
+        # de Turnado/ROL2, se quedaban fuera del modal aunque el FUS sí
+        # tuviera respuestas reales registradas (ej. cualquier FUS comisionado
+        # directo, sin turnado de por medio).
+        TIPO_SEG_LABEL = dict(SeguimientoRespuesta.TIPO_CHOICES)
+        for s in fus.seguimientosComisionado.filter(activo=1).select_related('idAutor'):
+            seguimientos.append({
+                'fecha': s.fechaRegistro,
+                'autor': resolver_nombre(s.idAutor) if s.idAutor else None,
+                'texto': f'{TIPO_SEG_LABEL.get(s.tipo, s.tipo)}: {s.contenido}',
+            })
+        seguimientos.sort(key=lambda s: s['fecha'] or '')
 
         sol = fus.idSolicitanteInterno
         return Response({
@@ -472,7 +489,7 @@ def generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL1'):
     # ── Encabezado ──
     elements.append(Paragraph('FORMATO ÚNICO DE SOLICITUD', st_titulo))
     elements.append(Paragraph(
-        f'Folio: {fus.folio} &nbsp;|&nbsp; Estatus: {fus.estatusParticular_id}',
+        f'Folio: {fus.folio} &nbsp;|&nbsp; Estatus: {fus.estatusParticular.nombre if fus.estatusParticular_id else "—"}',
         st_folio,
     ))
     elements.append(HRFlowable(width='100%', thickness=2, color=VERDE, spaceAfter=10))

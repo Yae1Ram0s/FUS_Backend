@@ -20,6 +20,7 @@ from ..permissions import (
     EsComisionado, EsComisionadoAsignado, PuedeVerSeguimientoComisionado,
 )
 from ..helpers import notificar_por_correo
+from ..utils import _equipo_particular_de
 from .helpers import _rol, _log, _primer_error
 from .turnado import _push_notificacion
 
@@ -179,6 +180,7 @@ class SeguimientoComisionadoListCreateView(APIView):
             # el comisionado vuelva a responder). select_for_update evita que
             # dos respuestas casi simultáneas disparen la transición dos veces.
             fus_lock = FUS.objects.select_for_update().get(pk=fus.pk)
+            notificaciones = []
             if fus_lock.estatusParticular_id in ('En_seguimiento', 'Rechazado'):
                 est_ant = fus_lock.estatusParticular_id
                 fus_lock.estatusParticular_id = 'Atendido'
@@ -198,6 +200,30 @@ class SeguimientoComisionadoListCreateView(APIView):
                     fus.turnados.filter(activo=1, estatusTitular_id='Rechazado').update(
                         estatusTitular_id='En_seguimiento', idUsuarioModifica=user.id
                     )
+
+                # Sin esto, nadie se enteraba en vivo de que el comisionado ya
+                # atendió el FUS — mismo criterio de destinatarios que
+                # AtendidoFUSView (unidad del comisionado, o dueño directo si
+                # no hay comisionado, más su(s) EQUIPO_PARTICULAR).
+                destinatarios = set(
+                    _particulares_area(_unidad_id(fus.idComisionado)) if fus.idComisionado_id
+                    else ([fus.idSolicitanteInterno] if fus.idSolicitanteInterno_id else [])
+                )
+                destinatarios |= set(_equipo_particular_de(fus.idSolicitanteInterno))
+                destinatarios.discard(user)
+                notificaciones = [
+                    Notificacion.objects.create(
+                        idDestinatario=particular,
+                        fusFolio=fus.folio,
+                        tipoEvento='SEGUIMIENTO_FINALIZADO',
+                        mensaje=f"El comisionado atendió el FUS {fus.folio}.",
+                    )
+                    for particular in destinatarios
+                ]
+
+        for notif in notificaciones:
+            _push_notificacion(notif)
+            notificar_por_correo(notif)
 
         return Response(SeguimientoRespuestaSerializer(seg).data, status=201)
 
@@ -237,6 +263,17 @@ class AtendidoFUSView(APIView):
             _log(usuario=user.email, rol=rol, accion='ATENCION_FUS',
                  ip=ip, folio=fus.folio, estado_ant=est_ant, estado_nuevo='Pendiente_validacion')
 
+            # Con comisionado: se notifica a todos los Rol 1 de su unidad (varios
+            # pueden compartir supervisión). Sin comisionado (Rol 2 directo, este
+            # mismo endpoint también lo dispara): _unidad_id(None) no resuelve
+            # nada, así que se notifica directo al dueño real del FUS — más su(s)
+            # asistente(s) EQUIPO_PARTICULAR, que comparten esa misma pantalla.
+            destinatarios = set(
+                _particulares_area(_unidad_id(fus.idComisionado)) if fus.idComisionado_id
+                else ([fus.idSolicitanteInterno] if fus.idSolicitanteInterno_id else [])
+            )
+            destinatarios |= set(_equipo_particular_de(fus.idSolicitanteInterno))
+            destinatarios.discard(user)
             notificaciones = [
                 Notificacion.objects.create(
                     idDestinatario=particular,
@@ -244,7 +281,7 @@ class AtendidoFUSView(APIView):
                     tipoEvento='SEGUIMIENTO_FINALIZADO',
                     mensaje=f"El seguimiento del FUS {fus.folio} fue atendido y está pendiente de tu validación.",
                 )
-                for particular in _particulares_area(_unidad_id(fus.idComisionado))
+                for particular in destinatarios
             ]
 
         for notif in notificaciones:
@@ -289,7 +326,20 @@ class ConcluirAsuntoView(APIView):
             _log(usuario=user.email, rol=_rol(user), accion='APROBACION_FUS',
                  ip=ip, folio=fus.folio, estado_ant=est_ant, estado_nuevo='Concluido')
 
+            # Sin comisionado ni `comisionador` (Rol 2 respondió directo, nadie
+            # comisionó), el set quedaba vacío y Rol 2 nunca se enteraba de la
+            # conclusión salvo refrescando — se agrega también el destinatario
+            # de cada turnado activo, el dueño del FUS y su(s) asistente(s)
+            # EQUIPO_PARTICULAR, sin auto-notificar a quien acaba de concluir.
             destinatarios = {u for u in (fus.idComisionado, comisionador) if u}
+            for turnado in fus.turnados.filter(activo=1).select_related('idDestinatario'):
+                if turnado.idDestinatario_id:
+                    destinatarios.add(turnado.idDestinatario)
+            if fus.idSolicitanteInterno_id:
+                destinatarios.add(fus.idSolicitanteInterno)
+            destinatarios |= set(_equipo_particular_de(fus.idSolicitanteInterno))
+            destinatarios.discard(user)
+
             notificaciones = [
                 Notificacion.objects.create(
                     idDestinatario=destinatario,
@@ -347,16 +397,40 @@ class RechazarSolicitudView(APIView):
             _log(usuario=user.email, rol=_rol(user), accion='RECHAZO_FUS',
                  ip=ip, folio=fus.folio, estado_ant=est_ant, estado_nuevo='Rechazado', obs=motivo)
 
-            notif = None
+            # `comisionador` es quien ejecutó "Comisionar" (Rol 1 o Rol 2), no el
+            # comisionado en sí — a diferencia de ConcluirAsuntoView, aquí nunca
+            # se notificaba al comisionado directamente, así que su pantalla
+            # (FUSComisionados) no reabría el formulario de respuesta hasta
+            # refrescar. Si el FUS nunca tuvo comisionado (Rol 2 respondió
+            # directo), `comisionador` queda None y antes nadie se enteraba del
+            # rechazo salvo refrescando — se agrega también el destinatario de
+            # cada turnado activo, el dueño del FUS y su(s) asistente(s)
+            # EQUIPO_PARTICULAR (comparten la misma pantalla que él), sin
+            # duplicar y sin auto-notificar a quien acaba de rechazar.
+            destinatarios = set()
             if comisionador:
-                notif = Notificacion.objects.create(
-                    idDestinatario=comisionador,
+                destinatarios.add(comisionador)
+            if fus.idComisionado_id:
+                destinatarios.add(fus.idComisionado)
+            for turnado in fus.turnados.filter(activo=1).select_related('idDestinatario'):
+                if turnado.idDestinatario_id:
+                    destinatarios.add(turnado.idDestinatario)
+            if fus.idSolicitanteInterno_id:
+                destinatarios.add(fus.idSolicitanteInterno)
+            destinatarios |= set(_equipo_particular_de(fus.idSolicitanteInterno))
+            destinatarios.discard(user)
+
+            notificaciones = [
+                Notificacion.objects.create(
+                    idDestinatario=dest,
                     fusFolio=fus.folio,
                     tipoEvento='SOLICITUD_RECHAZADA',
                     mensaje=f"El FUS {fus.folio} fue rechazado: {motivo}. Vuelve a consultarlo para reabrirlo a seguimiento.",
                 )
+                for dest in destinatarios
+            ]
 
-        if notif:
+        for notif in notificaciones:
             _push_notificacion(notif)
             notificar_por_correo(notif)
 

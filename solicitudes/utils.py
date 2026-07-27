@@ -29,6 +29,19 @@ def _propietario_fus(user):
     return None
 
 
+def _equipo_particular_de(propietario):
+    """Usuarios EQUIPO_PARTICULAR que asisten a este ROL1 — inverso de
+    _propietario_fus: quienes tienen a `propietario` como
+    CorreoAutorizado.idUsuarioRegistra. Comparten pantallas/visibilidad con
+    él (ConsultarFUS), así que deben recibir las mismas notificaciones."""
+    if not propietario:
+        return User.objects.none()
+    emails = CorreoAutorizado.objects.filter(
+        rol='EQUIPO_PARTICULAR', activo=1, idUsuarioRegistra=propietario.id
+    ).values_list('email', flat=True)
+    return User.objects.filter(email__in=emails, is_active=True)
+
+
 def resolver_nombre(user):
     """Nombre autoritativo del usuario (el mismo que ve en su sesión), con fallback."""
     autorizado = CorreoAutorizado.objects.filter(email=user.email).first()

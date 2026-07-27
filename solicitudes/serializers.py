@@ -41,6 +41,7 @@ class FUSSerializer(serializers.ModelSerializer):
     slaPorVencer         = serializers.SerializerMethodField()
     estadoTemporalidad   = serializers.SerializerMethodField()
     direccionComisionado = serializers.SerializerMethodField()
+    direccionTitular     = serializers.SerializerMethodField()
     tieneTurnado         = serializers.SerializerMethodField()
 
     class Meta:
@@ -51,13 +52,21 @@ class FUSSerializer(serializers.ModelSerializer):
             'prioridad', 'criterios', 'estatusParticular', 'fechaConclusion',
             'nombreExterno', 'telefonoExterno', 'correoExterno', 'evidencias',
             'fechaLimite', 'slaVencido', 'slaPorVencer', 'estadoTemporalidad',
-            'idComisionado', 'fechaAsignacion', 'direccionComisionado', 'tieneTurnado',
+            'idComisionado', 'fechaAsignacion', 'direccionComisionado', 'direccionTitular', 'tieneTurnado',
         ]
 
     def get_direccionComisionado(self, obj):
         if not obj.idComisionado_id:
             return None
         return _resolver_unidad_administrativa(obj.idComisionado)
+
+    def get_direccionTitular(self, obj):
+        # Unidad administrativa del Titular (ROL2) al que se turnó este FUS —
+        # no la del Comisionado (ver direccionComisionado, distinto criterio).
+        turnado = obj.turnados.filter(activo=1).first()
+        if not turnado or not turnado.idDestinatario_id:
+            return None
+        return _resolver_unidad_administrativa(turnado.idDestinatario)
 
     def get_tieneTurnado(self, obj):
         # True si el FUS pasó por el flujo de Titular (se turnó a un ROL2)

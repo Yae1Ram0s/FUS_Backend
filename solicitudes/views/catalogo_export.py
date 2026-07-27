@@ -16,7 +16,7 @@ def _fus_queryset(request):
     if rol not in ROLES_PARTICULAR:
         raise PermissionDenied('No autorizado.')
     qs = FUS.objects.filter(activo=1).select_related(
-        'idSolicitanteInterno', 'idMedioRecepcion'
+        'idSolicitanteInterno', 'idMedioRecepcion', 'estatusParticular'
     ).order_by('-fechaRegistro')
     if rol == 'EQUIPO_PARTICULAR':
         propietario = _propietario_fus(request.user)
@@ -89,7 +89,7 @@ class ExportarFUSExcelView(APIView):
                 nombre_sol or (sol.email if sol else ''),
                 fus.idMedioRecepcion.nombreMedio if fus.idMedioRecepcion else '',
                 fus.prioridad or '',
-                fus.estatusParticular_id,
+                fus.estatusParticular.nombre if fus.estatusParticular_id else '',
                 fus.descripcion,
                 fus.contexto or '',
             ])
@@ -151,7 +151,7 @@ class ExportarFUSPDFView(APIView):
                 Paragraph(fmt(fus.fechaHora), cell_style),
                 Paragraph(nombre_sol, cell_style),
                 Paragraph(fus.prioridad or '—', cell_style),
-                Paragraph(fus.estatusParticular_id, cell_style),
+                Paragraph(fus.estatusParticular.nombre if fus.estatusParticular_id else '—', cell_style),
                 Paragraph(desc, cell_style),
             ])
 
