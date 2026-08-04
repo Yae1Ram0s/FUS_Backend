@@ -18,7 +18,14 @@ daphne==4.2.2
 channels-redis==4.3.0
 
 # Base de datos (MySQL)
-mysqlclient==2.2.8
+mysqlclient==2.2.8; platform_system == "Windows"
+
+# PostgreSQL en producciÃ³n (Neon) mediante DATABASE_URL
+dj-database-url>=3.0,<4
+psycopg[binary]>=3.2,<4
+
+# Archivos estÃ¡ticos del admin en Render
+whitenoise[brotli]>=6.9,<7
 
 # Generación de documentos
 reportlab==5.0.0

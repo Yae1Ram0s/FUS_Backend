@@ -59,6 +59,11 @@ def cargar_catalogos(apps, schema_editor):
         )
 
     connection = schema_editor.connection
+    # La fuente scs.scg_cat_unidad_administrativa solo existe en el esquema
+    # legado MySQL. En PostgreSQL la tabla destino se crea vacÃ­a.
+    if connection.vendor != 'mysql':
+        return
+
     with connection.cursor() as cursor:
         cursor.execute(
             """

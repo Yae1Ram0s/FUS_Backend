@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS scg_cat_unidad_administrativa (
   idUsuarioRegistra int DEFAULT NULL,
   idUsuarioModifica int DEFAULT NULL,
   activo int DEFAULT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+);
 """
 
 SQL_BORRAR_TABLA = "DROP TABLE IF EXISTS scg_cat_unidad_administrativa;"
