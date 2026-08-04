@@ -1,5 +1,6 @@
 import threading
 from datetime import timedelta
+from unittest.mock import patch
 
 from django import db
 from django.contrib.auth.models import User
@@ -186,6 +187,39 @@ class OTPFlowAPITests(APITestCase):
         })
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         user.refresh_from_db()
+        self.assertTrue(user.check_password('NuevaPass!2026'))
+        otp = CodigoOTP.objects.get(email=self.email, codigo='555555')
+        self.assertEqual(otp.usado, 1)
+
+    @patch('autenticacion.views.enviar_correo_otp')
+    def test_verificar_correo_con_usuario_sin_password_inicia_activacion(self, enviar_mock):
+        user = User(username=self.email, email=self.email)
+        user.set_unusable_password()
+        user.save()
+        resp = self.client.post('/api/auth/verificar-correo/', {'email': self.email})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['estado'], 'nuevo')
+        enviar_mock.assert_called_once()
+
+    def test_establecer_contrasena_activa_usuario_sin_password(self):
+        user = User(username=self.email, email=self.email)
+        user.set_unusable_password()
+        user.save()
+        self._crear_otp(codigo='555555')
+        resp = self.client.post('/api/auth/establecer-contrasena/', {
+            'email': self.email, 'codigo': '555555', 'password': 'Sup3rSegura!2026',
+        })
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        user.refresh_from_db()
+        self.assertTrue(user.check_password('Sup3rSegura!2026'))
+
+    def test_restablecer_contrasena_activa_correo_autorizado_sin_usuario(self):
+        self._crear_otp(codigo='555555')
+        resp = self.client.post('/api/auth/restablecer-contrasena/', {
+            'email': self.email, 'codigo': '555555', 'password': 'NuevaPass!2026',
+        })
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        user = User.objects.get(email=self.email)
         self.assertTrue(user.check_password('NuevaPass!2026'))
         otp = CodigoOTP.objects.get(email=self.email, codigo='555555')
         self.assertEqual(otp.usado, 1)

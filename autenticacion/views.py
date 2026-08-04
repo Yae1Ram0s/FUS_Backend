@@ -76,7 +76,8 @@ class VerificarCorreoView(APIView):
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
-        if User.objects.filter(email=email).exists():
+        django_user = User.objects.filter(email=email).first()
+        if django_user and django_user.has_usable_password():
             return Response({'estado': 'existente'})
 
         # Usuario nuevo — generar y enviar OTP
@@ -143,13 +144,18 @@ class EstablecerContrasenaView(APIView):
             if error:
                 return Response({'detail': error}, status=status.HTTP_400_BAD_REQUEST)
 
+            user = User.objects.select_for_update().filter(email=email).first()
+            if user and user.has_usable_password():
+                return Response({'detail': 'Esta cuenta ya fue creada. Intenta iniciar sesión.'}, status=400)
+            if not user:
+                user = User(username=email, email=email)
+            user.username = email
+            user.email = email
+            user.first_name = autorizado.nombre
+            user.is_active = True
+            user.set_password(password)
             try:
-                user = User.objects.create_user(
-                    username=email,
-                    email=email,
-                    password=password,
-                    first_name=autorizado.nombre,
-                )
+                user.save()
             except IntegrityError:
                 return Response({'detail': 'Esta cuenta ya fue creada. Intenta iniciar sesión.'}, status=400)
 
@@ -333,6 +339,10 @@ class RestablecerContrasenaView(APIView):
         except DjangoValidationError as e:
             return Response({'detail': ' '.join(e.messages)}, status=status.HTTP_400_BAD_REQUEST)
 
+        autorizado = CorreoAutorizado.objects.filter(email=email, activo=1).first()
+        if not autorizado:
+            return Response({'detail': 'Correo no autorizado.'}, status=status.HTTP_401_UNAUTHORIZED)
+
         # Mismo criterio que EstablecerContrasenaView: una sola transacción
         # desde la validación hasta consumir el OTP, para que el lock de
         # select_for_update cubra todo el tramo y no se pueda reutilizar el
@@ -345,7 +355,15 @@ class RestablecerContrasenaView(APIView):
             try:
                 user = User.objects.get(email=email)
             except User.DoesNotExist:
-                return Response({'detail': 'Usuario no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+                # Un correo creado desde administración todavía no tiene una
+                # fila en auth_user. Un OTP válido de recuperación también
+                # puede completar de forma segura esa primera activación.
+                user = User(
+                    username=email,
+                    email=email,
+                    first_name=autorizado.nombre,
+                    is_active=True,
+                )
 
             user.set_password(password)
             user.save()
@@ -353,10 +371,9 @@ class RestablecerContrasenaView(APIView):
             otp.usado = 1
             otp.save(update_fields=['usado'])
 
-        autorizado = CorreoAutorizado.objects.filter(email=email, activo=1).first()
         _log(
             usuario=email,
-            rol=autorizado.rol if autorizado else '',
+            rol=autorizado.rol,
             accion='RESTABLECER_CONTRASENA',
             ip=request.META.get('REMOTE_ADDR'),
         )
