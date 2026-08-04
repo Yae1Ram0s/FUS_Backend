@@ -1,7 +1,4 @@
-import hashlib
-import json
 import os
-import uuid
 
 from django.conf import settings
 from django.contrib.auth.models import User
@@ -20,91 +17,10 @@ from autenticacion.models import CorreoAutorizado
 from catalogos.models import MedioRecepcion
 from ..models import FUS, Evidencia, Turnado, Actividad, SeguimientoRespuesta
 from ..serializers import FUSSerializer, TurnadoActividadSerializer
+from ..services import generar_folio, guardar_evidencias
 from ..utils import resolver_nombre
 from ..helpers import _resolver_unidad_administrativa
-from .helpers import _rol, _log, _ROL_FOLIO, ROLES_PARTICULAR, _propietario_fus
-
-ALLOWED_MIME_TYPES = {
-    'application/pdf',
-    'image/jpeg',
-    'image/png',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-}
-ALLOWED_EXTENSIONS = {'.pdf', '.jpg', '.jpeg', '.png', '.docx'}
-MAX_FILE_SIZE      = 10 * 1024 * 1024   # 10 MB por archivo
-MAX_TOTAL_SIZE     = 30 * 1024 * 1024   # 30 MB por FUS
-
-
-def _validar_archivo(archivo):
-    ext  = os.path.splitext(archivo.name)[1].lower()
-    mime = (archivo.content_type or '').split(';')[0].strip()
-    if ext not in ALLOWED_EXTENSIONS:
-        return f'Extensión no permitida: {ext}. Usa PDF, JPG, PNG o DOCX.'
-    if mime and mime not in ALLOWED_MIME_TYPES:
-        return f'Tipo de archivo no permitido: {mime}.'
-    if archivo.size > MAX_FILE_SIZE:
-        return f'"{archivo.name}" supera 10 MB.'
-    return None
-
-
-def _generar_folio(rol, year):
-    from django.db import transaction
-    with transaction.atomic():
-        seq = FUS.objects.select_for_update().filter(fechaRegistro__year=year).count() + 1
-        segmento = _ROL_FOLIO.get(rol, rol)
-        return f"ANAM/{segmento}/FUS/{seq:04d}/{year}"
-
-
-def _sha256(f):
-    h = hashlib.sha256()
-    for chunk in f.chunks():
-        h.update(chunk)
-    return h.hexdigest()
-
-
-def _guardar_evidencias(fus, request, user):
-    """Valida y guarda los archivos de 'evidencias' del request para un FUS.
-    Devuelve una Response de error si algo falla, o None si todo salió bien."""
-    from django.conf import settings
-
-    archivos = request.FILES.getlist('evidencias')
-    if not archivos:
-        return None
-
-    total_size = sum(a.size for a in archivos)
-    if total_size > MAX_TOTAL_SIZE:
-        return Response({'detail': 'El total de archivos supera 30 MB.'}, status=status.HTTP_400_BAD_REQUEST)
-    for archivo in archivos:
-        err = _validar_archivo(archivo)
-        if err:
-            return Response({'detail': err}, status=status.HTTP_400_BAD_REQUEST)
-
-    try:
-        comentarios_lista = json.loads(request.data.get('comentariosEvidencias') or '[]')
-    except (ValueError, TypeError):
-        comentarios_lista = []
-
-    for i, archivo in enumerate(archivos):
-        sha = _sha256(archivo)
-        nombre_seguro = os.path.basename(archivo.name)
-        nombre_fisico = f"{uuid.uuid4().hex}_{nombre_seguro}"
-        ruta_rel = f"evidencias/{fus.pk}/{nombre_fisico}"
-        ruta_abs = os.path.join(settings.MEDIA_ROOT, ruta_rel)
-        os.makedirs(os.path.dirname(ruta_abs), exist_ok=True)
-        with open(ruta_abs, 'wb') as dest:
-            for chunk in archivo.chunks():
-                dest.write(chunk)
-        comentario = comentarios_lista[i].strip() if i < len(comentarios_lista) and comentarios_lista[i] else None
-        Evidencia.objects.create(
-            idFus=fus,
-            nombreArchivo=nombre_seguro,
-            rutaArchivo=ruta_rel,
-            tipoMime=archivo.content_type,
-            hashSha256=sha,
-            comentarios=comentario,
-            idUsuarioRegistra=user.id,
-        )
-    return None
+from .helpers import _rol, _log, ROLES_PARTICULAR, _propietario_fus, _puede_ver_fus
 
 
 # ── FUS ─────────────────────────────────────────────────────────────────────
@@ -126,23 +42,34 @@ class FUSListCreateView(APIView):
             propietario = _propietario_fus(request.user)
             qs = qs.filter(idSolicitanteInterno=propietario) if propietario else qs.none()
 
-        estatus   = request.query_params.get('estatusParticular')
-        prioridad = request.query_params.get('prioridad')
-        search    = request.query_params.get('search')
+        estatus_raw = request.query_params.get('estatusParticular')
+        prioridad   = request.query_params.get('prioridad')
+        search      = request.query_params.get('search')
         if prioridad:
             qs = qs.filter(prioridad=prioridad)
-        if estatus == 'Vencido':
-            # Indicador de temporalidad, no de estatus: por fechaLimite, sin
-            # importar en qué estatus del trámite esté el FUS — salvo
-            # Concluido, ya cerrado, donde la temporalidad deja de aplicar
-            # (mismo criterio que FUSSerializer.get_estadoTemporalidad).
-            qs = qs.filter(fechaLimite__lt=timezone.now()).exclude(estatusParticular_id='Concluido')
-        elif estatus == 'PorVencer':
-            from datetime import timedelta
-            ahora = timezone.now()
-            qs = qs.filter(fechaLimite__gte=ahora, fechaLimite__lte=ahora + timedelta(hours=24)).exclude(estatusParticular_id='Concluido')
-        elif estatus:
-            qs = qs.filter(estatusParticular_id=estatus)
+        if estatus_raw:
+            # Uno o varios chips a la vez (ej. "Registrado,Turnado") — se
+            # combinan con OR, ya que un FUS solo puede estar en un estatus:
+            # seleccionar varios amplía la bandeja, no la reduce a la
+            # intersección (que siempre daría vacío salvo Vencido/PorVencer,
+            # que son temporalidad y sí pueden convivir con un estatus).
+            q_estatus = Q()
+            for estatus in {e.strip() for e in estatus_raw.split(',') if e.strip()}:
+                if estatus == 'Vencido':
+                    # Indicador de temporalidad, no de estatus: por fechaLimite,
+                    # sin importar en qué estatus del trámite esté el FUS — salvo
+                    # Concluido, ya cerrado, donde la temporalidad deja de aplicar
+                    # (mismo criterio que FUSSerializer.get_estadoTemporalidad).
+                    q_estatus |= Q(fechaLimite__lt=timezone.now()) & ~Q(estatusParticular_id='Concluido')
+                elif estatus == 'PorVencer':
+                    from datetime import timedelta
+                    ahora = timezone.now()
+                    q_estatus |= Q(
+                        fechaLimite__gte=ahora, fechaLimite__lte=ahora + timedelta(hours=24),
+                    ) & ~Q(estatusParticular_id='Concluido')
+                else:
+                    q_estatus |= Q(estatusParticular_id=estatus)
+            qs = qs.filter(q_estatus)
         if search:
             emails_nombre = list(CorreoAutorizado.objects.filter(nombre__icontains=search).values_list('email', flat=True))
             qs = qs.filter(
@@ -196,7 +123,11 @@ class FUSListCreateView(APIView):
         data  = request.data
         ip    = request.META.get('REMOTE_ADDR')
         now   = timezone.now()
-        year  = now.year
+        # Año en hora local, no UTC: México es UTC-6, así que un registro
+        # entre ~18:00 y 23:59 hora local del 31 de diciembre ya cae en el
+        # año siguiente en UTC y generaba folio del año equivocado (mismo
+        # tipo de bug ya corregido para fechaLimite/Actividad).
+        year  = timezone.localtime(now).year
 
         medio_id = data.get('idMedioRecepcion')
         medio    = get_object_or_404(MedioRecepcion, pk=medio_id) if medio_id else None
@@ -205,48 +136,68 @@ class FUSListCreateView(APIView):
         tel_ext    = data.get('telefonoExterno', '').strip() or None
         correo_ext = data.get('correoExterno', '').strip() or None
 
-        from django.db import IntegrityError
+        from django.db import IntegrityError, transaction
 
         fus = None
-        for intento in range(3):
-            folio = _generar_folio(rol, year)
+        MAX_INTENTOS_FOLIO = 5
+        for intento in range(MAX_INTENTOS_FOLIO):
             try:
-                fus = FUS.objects.create(
-                    folio=folio,
-                    idSolicitanteInterno=propietario,
-                    fechaHora=now,
-                    descripcion=data.get('descripcion', ''),
-                    contexto=data.get('contexto', ''),
-                    idMedioRecepcion=medio,
-                    medioEspecificacion=data.get('medioEspecificacion', ''),
-                    prioridad=data.get('prioridad') or None,
-                    criterios=data.get('criterios') or None,
-                    nombreExterno=nombre_ext,
-                    telefonoExterno=tel_ext,
-                    correoExterno=correo_ext,
-                    estatusParticular_id='Registrado',
-                    idUsuarioRegistra=user.id,
-                    fechaLimite=data.get('fechaLimite') or None,
-                )
+                # El lock de generar_folio() (select_for_update) solo protege
+                # mientras se mantenga la misma transacción real: antes vivía
+                # en su propio `with transaction.atomic()` que hacía commit y
+                # liberaba el lock ANTES del create() de abajo, dejando una
+                # ventana donde dos altas simultáneas podían calcular el mismo
+                # consecutivo. Envolver folio+create en un solo atomic (nested
+                # atomic = savepoint de la misma transacción) cierra esa
+                # ventana; el unique=True de FUS.folio sigue como red de
+                # seguridad final vía el reintento.
+                with transaction.atomic():
+                    folio = generar_folio(rol, year)
+                    fus = FUS.objects.create(
+                        folio=folio,
+                        idSolicitanteInterno=propietario,
+                        fechaHora=now,
+                        descripcion=data.get('descripcion', ''),
+                        contexto=data.get('contexto', ''),
+                        idMedioRecepcion=medio,
+                        medioEspecificacion=data.get('medioEspecificacion', ''),
+                        prioridad=data.get('prioridad') or None,
+                        criterios=data.get('criterios') or None,
+                        nombreExterno=nombre_ext,
+                        telefonoExterno=tel_ext,
+                        correoExterno=correo_ext,
+                        estatusParticular_id='Registrado',
+                        idUsuarioRegistra=user.id,
+                        fechaLimite=data.get('fechaLimite') or None,
+                    )
                 break
             except IntegrityError:
-                if intento == 2:
-                    raise
+                if intento == MAX_INTENTOS_FOLIO - 1:
+                    return Response(
+                        {'detail': 'No se pudo generar el folio de la solicitud, intenta de nuevo.'},
+                        status=status.HTTP_409_CONFLICT,
+                    )
                 continue
 
         fus.refresh_from_db()
 
-        err_resp = _guardar_evidencias(fus, request, user)
+        err_resp = guardar_evidencias(fus, request, user)
         if err_resp:
             fus.delete()
             return err_resp
 
         if fus.fechaLimite:
+            # fus.fechaLimite viene del ORM en UTC — .date()/.time() directos
+            # devuelven el día/hora en UTC, que puede caer un día antes o
+            # después del que el usuario eligió (México es UTC-6). localtime()
+            # lo convierte a hora de México antes de partirlo, para que un
+            # límite de "hoy" quede en el calendario exactamente hoy.
+            limite_local = timezone.localtime(fus.fechaLimite)
             Actividad.objects.create(
                 titulo=f"Vence FUS: {fus.folio}",
-                fecha=fus.fechaLimite.date(),
-                horaInicio=fus.fechaLimite.time(),
-                horaFin=fus.fechaLimite.time(),
+                fecha=limite_local.date(),
+                horaInicio=limite_local.time(),
+                horaFin=limite_local.time(),
                 tipo='limite',
                 idCreador=user,
                 idFusRelacionado=fus,
@@ -311,7 +262,34 @@ class FUSDetailView(APIView):
         fus.save()
         fus.refresh_from_db()
 
-        err_resp = _guardar_evidencias(fus, request, user)
+        if 'fechaLimite' in data:
+            if fus.fechaLimite:
+                # Igual que al registrar/turnar (ver comentario en el POST de
+                # esta vista): localtime() antes de partir en fecha/hora, o un
+                # límite de "hoy" puede quedar un día antes o después en el
+                # calendario (México es UTC-6). update_or_create sin filtrar
+                # por `activo` reutiliza el recordatorio existente (si lo
+                # había) tanto para agregar la fecha límite por primera vez
+                # como para reprogramarla.
+                limite_local = timezone.localtime(fus.fechaLimite)
+                Actividad.objects.update_or_create(
+                    idFusRelacionado=fus, tipo='limite',
+                    defaults={
+                        'titulo': f"Vence FUS: {fus.folio}",
+                        'fecha': limite_local.date(),
+                        'horaInicio': limite_local.time(),
+                        'horaFin': limite_local.time(),
+                        'idCreador': user,
+                        'activo': 1,
+                    },
+                )
+            else:
+                # Se quitó la fecha límite: el recordatorio deja de aplicar
+                # (baja lógica, no se borra — mismo criterio que el resto del
+                # calendario).
+                Actividad.objects.filter(idFusRelacionado=fus, tipo='limite').update(activo=0)
+
+        err_resp = guardar_evidencias(fus, request, user)
         if err_resp:
             return err_resp
 
@@ -404,16 +382,17 @@ class DescargarEvidenciaView(APIView):
     def get(self, request, evidencia_id):
         evidencia = get_object_or_404(Evidencia, pk=evidencia_id, activo=1)
         fus = evidencia.idFus
-        rol = _rol(request.user)
-        if rol in ROLES_PARTICULAR:
-            propietario = _propietario_fus(request.user)
-            if not propietario or fus.idSolicitanteInterno_id != propietario.id:
-                raise Http404
-        if rol == 'ROL2':
-            es_destinatario = Turnado.objects.filter(idFus=fus, idDestinatario=request.user, activo=1).exists()
-            if not es_destinatario:
-                raise Http404
-        ruta = os.path.join(settings.MEDIA_ROOT, evidencia.rutaArchivo)
+        if not _puede_ver_fus(request.user, fus):
+            raise Http404
+
+        # Defensa en profundidad: aunque rutaArchivo se genera con
+        # os.path.basename() al subir el archivo (sin componentes de
+        # directorio de por medio), se revalida aquí que la ruta resuelta
+        # no se salga de MEDIA_ROOT antes de abrir el archivo.
+        media_root = os.path.realpath(settings.MEDIA_ROOT)
+        ruta = os.path.realpath(os.path.join(media_root, evidencia.rutaArchivo))
+        if os.path.commonpath([media_root, ruta]) != media_root:
+            raise Http404
         if not os.path.exists(ruta):
             raise Http404
         return FileResponse(open(ruta, 'rb'), as_attachment=True, filename=evidencia.nombreArchivo)

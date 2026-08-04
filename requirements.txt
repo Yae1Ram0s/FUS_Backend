@@ -1,0 +1,27 @@
+# Dependencias directas del backend (Django + Channels/ASGI).
+# Generado a partir del entorno virtual instalado (venv) — versiones
+# exactas fijadas para reproducibilidad.
+
+Django==6.0.6
+djangorestframework==3.17.1
+djangorestframework_simplejwt==5.5.1
+django-cors-headers==4.9.0
+
+# ASGI / WebSockets (notificaciones en tiempo real)
+channels==4.3.2
+daphne==4.2.2
+# Requerido solo cuando CHANNEL_LAYERS usa Redis (ver backend/settings.py:
+# se activa automáticamente si la variable de entorno REDIS_URL está
+# definida; sin ella se usa channels.layers.InMemoryChannelLayer y esta
+# dependencia no hace falta en tiempo de ejecución, pero se deja fijada
+# aquí para que un despliegue con Redis no tenga que recordarlo aparte).
+channels-redis==4.3.0
+
+# Base de datos (MySQL)
+mysqlclient==2.2.8
+
+# Generación de documentos
+reportlab==5.0.0
+pillow==12.2.0
+openpyxl==3.1.5
+python-pptx==1.0.2

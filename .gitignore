@@ -27,6 +27,9 @@ staticfiles/
 mediafiles/
 media/
 
+# Respaldos de base de datos — contienen hashes de contraseñas y códigos OTP reales
+backups/
+
 # Logs
 *.log
 

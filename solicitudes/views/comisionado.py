@@ -19,10 +19,9 @@ from ..permissions import (
     EsRol1oRol2, EsRol1oTurnadoDestinatario, EsRol1DuenoDelFUS,
     EsComisionado, EsComisionadoAsignado, PuedeVerSeguimientoComisionado,
 )
-from ..helpers import notificar_por_correo
+from ..services import notificar_por_correo, push_notificacion
 from ..utils import _equipo_particular_de
 from .helpers import _rol, _log, _primer_error
-from .turnado import _push_notificacion
 
 
 def _particulares_area(unidad_id):
@@ -77,8 +76,9 @@ class FUSComisionadosDisponiblesView(APIView):
 class ComisionarFUSView(APIView):
     permission_classes = [IsAuthenticated, EsRol1oTurnadoDestinatario]
 
+    @transaction.atomic
     def post(self, request, pk):
-        fus = get_object_or_404(FUS, pk=pk, activo=1)
+        fus = get_object_or_404(FUS.objects.select_for_update(), pk=pk, activo=1)
         self.check_object_permissions(request, fus)
 
         ser = ComisionarFUSSerializer(data=request.data, context={'request': request, 'fus': fus})
@@ -116,7 +116,7 @@ class ComisionarFUSView(APIView):
                 mensaje=f"{nombre_asignador} te asignó el FUS {fus.folio} para su seguimiento.",
             )
 
-        _push_notificacion(notif)
+        push_notificacion(notif)
         notificar_por_correo(notif)
 
         return Response(FUSSerializer(fus).data)
@@ -222,7 +222,7 @@ class SeguimientoComisionadoListCreateView(APIView):
                 ]
 
         for notif in notificaciones:
-            _push_notificacion(notif)
+            push_notificacion(notif)
             notificar_por_correo(notif)
 
         return Response(SeguimientoRespuestaSerializer(seg).data, status=201)
@@ -235,8 +235,9 @@ class AtendidoFUSView(APIView):
     cualquier Rol 2 de la dirección)."""
     permission_classes = [IsAuthenticated, EsRol1oTurnadoDestinatario]
 
+    @transaction.atomic
     def post(self, request, pk):
-        fus = get_object_or_404(FUS, pk=pk, activo=1)
+        fus = get_object_or_404(FUS.objects.select_for_update(), pk=pk, activo=1)
         self.check_object_permissions(request, fus)
 
         ser = AtendidoFUSSerializer(data=request.data, context={'fus': fus})
@@ -285,7 +286,7 @@ class AtendidoFUSView(APIView):
             ]
 
         for notif in notificaciones:
-            _push_notificacion(notif)
+            push_notificacion(notif)
             notificar_por_correo(notif)
 
         return Response(FUSSerializer(fus).data)
@@ -296,8 +297,9 @@ class ConcluirAsuntoView(APIView):
     la dirección del comisionado asignado."""
     permission_classes = [IsAuthenticated, EsRol1DuenoDelFUS]
 
+    @transaction.atomic
     def post(self, request, pk):
-        fus = get_object_or_404(FUS, pk=pk, activo=1)
+        fus = get_object_or_404(FUS.objects.select_for_update(), pk=pk, activo=1)
         self.check_object_permissions(request, fus)
 
         ser = ConcluirAsuntoSerializer(data=request.data, context={'fus': fus})
@@ -351,7 +353,7 @@ class ConcluirAsuntoView(APIView):
             ]
 
         for notif in notificaciones:
-            _push_notificacion(notif)
+            push_notificacion(notif)
             notificar_por_correo(notif)
 
         return Response(FUSSerializer(fus).data)
@@ -366,8 +368,9 @@ class RechazarSolicitudView(APIView):
     este FUS."""
     permission_classes = [IsAuthenticated, EsRol1DuenoDelFUS]
 
+    @transaction.atomic
     def post(self, request, pk):
-        fus = get_object_or_404(FUS, pk=pk, activo=1)
+        fus = get_object_or_404(FUS.objects.select_for_update(), pk=pk, activo=1)
         self.check_object_permissions(request, fus)
 
         ser = RechazarSolicitudSerializer(data=request.data, context={'fus': fus})
@@ -431,7 +434,7 @@ class RechazarSolicitudView(APIView):
             ]
 
         for notif in notificaciones:
-            _push_notificacion(notif)
+            push_notificacion(notif)
             notificar_por_correo(notif)
 
         return Response(FUSSerializer(fus).data)

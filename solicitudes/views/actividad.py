@@ -7,8 +7,7 @@ from rest_framework.permissions import IsAuthenticated
 
 from ..models import Actividad, Notificacion
 from ..serializers import ActividadSerializer
-from ..helpers import notificar_por_correo
-from .turnado import _push_notificacion
+from ..services import notificar_por_correo, push_notificacion
 
 
 class ActividadListCreateView(APIView):
@@ -54,7 +53,7 @@ class ActividadListCreateView(APIView):
                     idDestinatario_id=uid, fusFolio=actividad.idFusRelacionado.folio if actividad.idFusRelacionado else '',
                     tipoEvento='ACTIVIDAD', mensaje=f"Fuiste invitado a '{actividad.titulo}' el {actividad.fecha}.",
                 )
-                _push_notificacion(notif)
+                push_notificacion(notif)
                 notificar_por_correo(notif)
         return Response(ActividadSerializer(actividad).data, status=201)
 

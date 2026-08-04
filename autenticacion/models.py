@@ -5,7 +5,7 @@ class CorreoAutorizado(models.Model):
     """Lista blanca de correos @anam.gob.mx con acceso al sistema (RN-06, CU-01)."""
 
     class Meta:
-        db_table = 'scs_cat_correos_autorizados'
+        db_table = 'scs_auth_correos_autorizados'
 
     ROL_CHOICES = [
         ('ROL1', 'Particular del Titular'),
@@ -21,11 +21,12 @@ class CorreoAutorizado(models.Model):
         'catalogos.UnidadAdministrativa', null=True, blank=True,
         on_delete=models.SET_NULL, db_constraint=False,
         related_name='correos_autorizados',
+        db_column='unidad_administrativa_id',
     )
-    fechaRegistro = models.DateTimeField(auto_now_add=True, null=True)
-    fechaModificacion = models.DateTimeField(auto_now=True, null=True)
-    idUsuarioRegistra = models.IntegerField(null=True, blank=True)
-    idUsuarioModifica = models.IntegerField(null=True, blank=True)
+    fechaRegistro = models.DateTimeField(auto_now_add=True, null=True, db_column='fecha_registro')
+    fechaModificacion = models.DateTimeField(auto_now=True, null=True, db_column='fecha_modificacion')
+    idUsuarioRegistra = models.IntegerField(null=True, blank=True, db_column='usuario_registra_id')
+    idUsuarioModifica = models.IntegerField(null=True, blank=True, db_column='usuario_modifica_id')
     activo = models.IntegerField(default=1)
 
     def __str__(self):
@@ -36,14 +37,15 @@ class CodigoOTP(models.Model):
     """OTP de verificación para primer acceso y recuperación de contraseña (CU-01, CU-02)."""
 
     class Meta:
-        db_table = 'scs_tbl_codigos_otp'
+        db_table = 'scs_auth_codigos_otp'
 
     email = models.EmailField()
     codigo = models.CharField(max_length=10)
-    fechaGeneracion = models.DateTimeField(auto_now_add=True)
-    fechaExpiracion = models.DateTimeField()
+    fechaGeneracion = models.DateTimeField(auto_now_add=True, db_column='fecha_generacion')
+    fechaExpiracion = models.DateTimeField(db_column='fecha_expiracion')
     usado = models.IntegerField(default=0)
-    ipSolicitante = models.GenericIPAddressField(null=True, blank=True)
+    ipSolicitante = models.GenericIPAddressField(null=True, blank=True, db_column='ip_solicitante')
+    intentosFallidos = models.PositiveSmallIntegerField(default=0, db_column='intentos_fallidos')
 
     def __str__(self):
         return f"OTP {self.email} – {'usado' if self.usado else 'vigente'}"

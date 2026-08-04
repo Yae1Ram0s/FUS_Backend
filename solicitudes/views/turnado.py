@@ -1,5 +1,7 @@
 from django.contrib.auth.models import User
+from django.db import transaction
 from django.db.models import Q
+from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
@@ -16,34 +18,21 @@ from ..serializers import (
     SeguimientoComisionadoComoActividadSerializer,
 )
 from ..utils import resolver_nombre
-from ..helpers import notificar_por_correo
-from .helpers import _rol, _log, ROLES_PARTICULAR, _propietario_fus
-
-
-def _push_notificacion(notif):
-    from asgiref.sync import async_to_sync
-    from channels.layers import get_channel_layer
-    channel_layer = get_channel_layer()
-    if channel_layer is None:
-        return
-    group_name = f'notificaciones_{notif.idDestinatario_id}'
-    data = {
-        'id':            str(notif.id),
-        'fusFolio':      notif.fusFolio,
-        'tipo':          notif.tipoEvento,
-        'mensaje':       notif.mensaje,
-        'leida':         False,
-        'fechaCreacion': notif.fechaGeneracion.isoformat(),
-    }
-    async_to_sync(channel_layer.group_send)(
-        group_name,
-        {'type': 'nueva_notificacion', 'data': data},
-    )
+from ..services import notificar_por_correo, push_notificacion
+from .comisionado import _quien_comisiono
+from .helpers import (
+    _log,
+    _propietario_fus,
+    _puede_ver_fus,
+    _rol,
+    ROLES_PARTICULAR,
+)
 
 
 class TurnarFUSView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @transaction.atomic
     def post(self, request, pk):
         user = request.user
         rol  = _rol(user)
@@ -54,7 +43,10 @@ class TurnarFUSView(APIView):
         if not propietario:
             return Response({'detail': 'No autorizado.'}, status=403)
 
-        fus           = get_object_or_404(FUS, pk=pk, activo=1, idSolicitanteInterno=propietario)
+        fus           = get_object_or_404(
+            FUS.objects.select_for_update(),
+            pk=pk, activo=1, idSolicitanteInterno=propietario,
+        )
         ip            = request.META.get('REMOTE_ADDR')
         destinatarios = request.data.get('destinatarios', [])
         solicitud_txt = request.data.get('solicitudTexto', '')
@@ -94,13 +86,18 @@ class TurnarFUSView(APIView):
                 idUsuarioRegistra=user.id,
             )
             if fus.fechaLimite:
+                # Ver comentario equivalente en FUSListCreateView.post
+                # (views/fus.py): localtime() antes de partir en fecha/hora,
+                # o un límite de "hoy" puede quedar registrado un día antes o
+                # después en el calendario (México es UTC-6).
+                limite_local = timezone.localtime(fus.fechaLimite)
                 actividad_limite, _creada = Actividad.objects.get_or_create(
                     idFusRelacionado=fus, tipo='limite', activo=1,
                     defaults={
                         'titulo': f"Vence FUS: {fus.folio}",
-                        'fecha': fus.fechaLimite.date(),
-                        'horaInicio': fus.fechaLimite.time(),
-                        'horaFin': fus.fechaLimite.time(),
+                        'fecha': limite_local.date(),
+                        'horaInicio': limite_local.time(),
+                        'horaFin': limite_local.time(),
                         'idCreador': user,
                     },
                 )
@@ -112,7 +109,7 @@ class TurnarFUSView(APIView):
                 tipoEvento='TURNADO',
                 mensaje=f"{nombre_remitente} te ha turnado el FUS {fus.folio}.",
             )
-            _push_notificacion(_notif)
+            push_notificacion(_notif)
             notificar_por_correo(_notif)
 
         estado_ant = fus.estatusParticular_id
@@ -172,13 +169,25 @@ class FUSActividadView(APIView):
                 item['descripcionActividad'] = f"Solicitud rechazada: {item['descripcionActividad']}"
 
             if respuestas or rechazos:
-                for t in data:
-                    nombre_titular = (t.get('idDestinatario') or {}).get('nombre') or ''
-                    extra = (
-                        [{**item, 'autorNombre': nombre_titular} for item in respuestas] +
-                        [{**item, 'autorNombre': None} for item in rechazos]
-                    )
-                    t['seguimientos'] = sorted(t['seguimientos'] + extra, key=lambda s: s['fechaRegistro'])
+                # Con un solo turnado no hay ambigüedad. Con varios (varios
+                # destinatarios), el comisionado se asignó a través de UNO de
+                # ellos — agregarle estas respuestas a todos los `t` duplicaba
+                # el mismo historial del comisionado una vez por cada
+                # destinatario. Se identifica al titular que comisionó (vía
+                # bitácora) y solo se le agregan a su turnado; si no se puede
+                # identificar (ej. comisionó Rol 1), se agregan al más
+                # reciente para no perder la información.
+                comisiono = _quien_comisiono(fus)
+                turnado_destino = next(
+                    (t for t in data if comisiono and (t.get('idDestinatario') or {}).get('id') == comisiono.id),
+                    data[-1],
+                )
+                nombre_titular = (turnado_destino.get('idDestinatario') or {}).get('nombre') or ''
+                extra = (
+                    [{**item, 'autorNombre': nombre_titular} for item in respuestas] +
+                    [{**item, 'autorNombre': None} for item in rechazos]
+                )
+                turnado_destino['seguimientos'] = sorted(turnado_destino['seguimientos'] + extra, key=lambda s: s['fechaRegistro'])
 
         return Response(data)
 
@@ -186,9 +195,10 @@ class FUSActividadView(APIView):
 class FUSTrazabilidadView(APIView):
     """Línea de tiempo completa de un FUS: creación, turnado(s), comisión y
     respuestas (tanto del flujo directo de Rol 2 como del de Comisionado),
-    rechazo y conclusión. Sin restricción de dueño a nivel de FUS: la usan
-    tanto Consultar FUS como Bitácora, y en Bitácora un ROL1 audita folios
-    que no necesariamente son suyos.
+    rechazo y conclusión. ROL1 audita cualquier folio (la usan tanto
+    Consultar FUS como Bitácora); Equipo del Particular, ROL2 y Comisionado
+    solo pueden ver folios con los que tienen relación real — ver
+    _puede_ver_fus. Un usuario sin relación con el FUS recibe 404.
 
     ROL2 solo ve su propia porción: el turnado que le corresponde a él (no
     los de otros destinatarios) — nada de creación, que es anterior a que
@@ -201,6 +211,8 @@ class FUSTrazabilidadView(APIView):
 
     def get(self, request, folio):
         fus = get_object_or_404(FUS, folio=folio, activo=1)
+        if not _puede_ver_fus(request.user, fus):
+            raise Http404
         rol = _rol(request.user)
         es_rol2 = rol == 'ROL2'
         tiene_turnado = fus.turnados.filter(activo=1).exists()
@@ -319,30 +331,36 @@ class MisTurnadosView(APIView):
             'idRemitente', 'idMedio',
         )
 
-        estatus   = request.query_params.get('estatusTitular')
-        prioridad = request.query_params.get('prioridad')
-        search    = request.query_params.get('search')
+        estatus_raw = request.query_params.get('estatusTitular')
+        prioridad   = request.query_params.get('prioridad')
+        search      = request.query_params.get('search')
         if prioridad:
             qs = qs.filter(idFus__prioridad=prioridad)
-        if estatus == 'Vencido':
-            # Indicador de temporalidad, no de estatus: por fechaLimite, sin
-            # importar en qué estatus del trámite esté el FUS — salvo
-            # Concluido, ya cerrado, donde la temporalidad deja de aplicar
-            # (mismo criterio que FUSSerializer.get_estadoTemporalidad).
-            qs = qs.filter(idFus__fechaLimite__lt=timezone.now()).exclude(idFus__estatusParticular_id='Concluido')
-        elif estatus == 'PorVencer':
-            from datetime import timedelta
-            ahora = timezone.now()
-            qs = qs.filter(
-                idFus__fechaLimite__gte=ahora,
-                idFus__fechaLimite__lte=ahora + timedelta(hours=24),
-            ).exclude(idFus__estatusParticular_id='Concluido')
-        elif estatus in ('Rechazado', 'Pendiente_validacion'):
-            # Viven en FUS.estatusParticular, no en Turnado.estatusTitular —
-            # el sidebar de ROL2 los ofrece bajo el mismo parámetro `estatusTitular`.
-            qs = qs.filter(idFus__estatusParticular_id=estatus)
-        elif estatus:
-            qs = qs.filter(estatusTitular_id=estatus)
+        if estatus_raw:
+            # Uno o varios chips a la vez (ej. "Recibido,En_seguimiento") — se
+            # combinan con OR, ya que un turnado solo puede estar en un
+            # estatus: seleccionar varios amplía la bandeja, no la reduce.
+            q_estatus = Q()
+            for estatus in {e.strip() for e in estatus_raw.split(',') if e.strip()}:
+                if estatus == 'Vencido':
+                    # Indicador de temporalidad, no de estatus: por fechaLimite,
+                    # sin importar en qué estatus del trámite esté el FUS — salvo
+                    # Concluido, ya cerrado, donde la temporalidad deja de aplicar
+                    # (mismo criterio que FUSSerializer.get_estadoTemporalidad).
+                    q_estatus |= Q(idFus__fechaLimite__lt=timezone.now()) & ~Q(idFus__estatusParticular_id='Concluido')
+                elif estatus == 'PorVencer':
+                    from datetime import timedelta
+                    ahora = timezone.now()
+                    q_estatus |= Q(
+                        idFus__fechaLimite__gte=ahora, idFus__fechaLimite__lte=ahora + timedelta(hours=24),
+                    ) & ~Q(idFus__estatusParticular_id='Concluido')
+                elif estatus in ('Rechazado', 'Pendiente_validacion'):
+                    # Viven en FUS.estatusParticular, no en Turnado.estatusTitular —
+                    # el sidebar de ROL2 los ofrece bajo el mismo parámetro `estatusTitular`.
+                    q_estatus |= Q(idFus__estatusParticular_id=estatus)
+                else:
+                    q_estatus |= Q(estatusTitular_id=estatus)
+            qs = qs.filter(q_estatus)
         if search:
             emails_nombre = list(CorreoAutorizado.objects.filter(nombre__icontains=search).values_list('email', flat=True))
             qs = qs.filter(
@@ -387,8 +405,14 @@ class MisTurnadosView(APIView):
 class ConcluirTurnadoView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @transaction.atomic
     def post(self, request, pk):
-        turnado = get_object_or_404(Turnado, pk=pk, activo=1, idDestinatario=request.user)
+        turnado = get_object_or_404(
+            Turnado.objects.select_for_update().select_related('idFus'),
+            pk=pk, activo=1, idDestinatario=request.user,
+        )
+        fus_bloqueado = FUS.objects.select_for_update().get(pk=turnado.idFus_id)
+        turnado.idFus = fus_bloqueado
 
         if turnado.estatusTitular_id == 'Concluido':
             return Response({'detail': 'El asunto ya está concluido.'}, status=400)
@@ -432,7 +456,7 @@ class ConcluirTurnadoView(APIView):
                 tipoEvento='CONCLUIDO',
                 mensaje=f"{nombre_concluye} ha concluido el FUS {fus.folio}.",
             )
-            _push_notificacion(_notif)
+            push_notificacion(_notif)
             notificar_por_correo(_notif)
 
             _log(usuario=user.email, rol=rol, accion='ASIGNACION_ESTADO',
@@ -539,7 +563,7 @@ class SeguimientoListCreateView(APIView):
                     tipoEvento='CAMBIO_ESTADO',
                     mensaje=mensaje,
                 )
-                _push_notificacion(_notif)
+                push_notificacion(_notif)
                 notificar_por_correo(_notif)
 
                 accion = 'REAPERTURA_FUS' if est_ant_turnado == 'Rechazado' else 'ASIGNACION_ESTADO'
@@ -548,17 +572,22 @@ class SeguimientoListCreateView(APIView):
                      estado_ant=est_ant_fus, estado_nuevo='Atendido',
                      obs=None if est_ant_turnado == 'Rechazado' else f'Primera respuesta registrada por {nombre_titular}')
         else:
-            # Seguimientos posteriores — notificar al ROL1 cada nueva respuesta
-            resumen = seg.descripcionActividad[:80]
-            if len(seg.descripcionActividad) > 80:
+            # Seguimientos posteriores — notificar al ROL1 cada nueva
+            # respuesta o acción. Una respuesta puede ir sin acción y una
+            # acción sin respuesta (RN nueva): si no hay descripción, el
+            # resumen y la etiqueta del mensaje usan accionTexto.
+            texto_resumen = seg.descripcionActividad or seg.accionTexto or ''
+            resumen = texto_resumen[:80]
+            if len(texto_resumen) > 80:
                 resumen += '…'
+            etiqueta = 'una nueva respuesta' if seg.descripcionActividad else 'una nueva acción'
             _notif = Notificacion.objects.create(
                 idDestinatario=fus.idSolicitanteInterno,
                 fusFolio=fus.folio,
                 tipoEvento='RESPUESTA',
-                mensaje=f"{nombre_titular} registró una nueva respuesta en el FUS {fus.folio}: \"{resumen}\"",
+                mensaje=f"{nombre_titular} registró {etiqueta} en el FUS {fus.folio}: \"{resumen}\"",
             )
-            _push_notificacion(_notif)
+            push_notificacion(_notif)
             notificar_por_correo(_notif)
 
         _log(usuario=user.email, rol=rol, accion='REGISTRO_RESPUESTA',

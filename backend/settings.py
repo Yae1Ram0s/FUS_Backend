@@ -34,6 +34,19 @@ CSRF_TRUSTED_ORIGINS = os.environ.get(
     'http://localhost:5173,https://localhost:5173'
 ).split(',')
 
+# En DEBUG se acepta además cualquier subdominio de ngrok (ALLOWED_HOSTS y
+# CSRF_TRUSTED_ORIGINS) — para probar la app desde otro dispositivo (celular,
+# otra compu) exponiendo el server local por un túnel, sin tener que editar
+# .env cada vez: el plan gratuito de ngrok asigna un subdominio nuevo en cada
+# reinicio del túnel. Ver también CORS_ALLOWED_ORIGIN_REGEXES más abajo.
+# Nunca se activa fuera de DEBUG, así que no es un riesgo en producción.
+if DEBUG:
+    ALLOWED_HOSTS += ['.ngrok-free.app', '.ngrok-free.dev', '.ngrok.io', '.ngrok.app']
+    CSRF_TRUSTED_ORIGINS += [
+        'https://*.ngrok-free.app', 'https://*.ngrok-free.dev',
+        'https://*.ngrok.io', 'https://*.ngrok.app',
+    ]
+
 # URL del frontend, usada para armar links absolutos en correos (p. ej. el
 # link al folio del FUS en las notificaciones).
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:5173')
@@ -132,6 +145,17 @@ if _cors_raw:
     CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_raw.split(',') if o.strip()]
 else:
     CORS_ALLOWED_ORIGINS = ['http://localhost:5173', 'https://localhost:5173']  # solo desarrollo local sin .env
+
+# Mismo criterio que ALLOWED_HOSTS/CSRF_TRUSTED_ORIGINS arriba: en DEBUG se
+# acepta cualquier subdominio de ngrok sin fijar la URL exacta. A diferencia
+# de CORS_ALLOW_ALL_ORIGINS ('*'), esto sigue funcionando con cookies
+# cross-origin — cada Origin recibido se valida contra el regex y se
+# devuelve explícito en la respuesta, nunca un comodín plano.
+if DEBUG:
+    CORS_ALLOWED_ORIGIN_REGEXES = [
+        r'^https://[a-zA-Z0-9-]+\.ngrok-free\.(app|dev)$',
+        r'^https://[a-zA-Z0-9-]+\.ngrok\.(io|app)$',
+    ]
 
 CORS_ALLOW_CREDENTIALS = True
 

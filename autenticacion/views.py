@@ -6,7 +6,7 @@ from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from datetime import timedelta
 
@@ -21,6 +21,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 from .models import CorreoAutorizado, CodigoOTP
 from .serializers import LoginSerializer, UsuarioROL2Serializer
 from .emails import enviar_correo_otp
+from .otp import validar_otp
 from solicitudes.utils import get_rol, log_bitacora as _log
 from catalogos.models import UnidadAdministrativa
 
@@ -99,18 +100,11 @@ class VerificarOTPView(APIView):
         email  = request.data.get('email', '').strip().lower()
         codigo = request.data.get('codigo', '').strip()
 
-        try:
-            CodigoOTP.objects.get(
-                email=email,
-                codigo=codigo,
-                usado=0,
-                fechaExpiracion__gt=timezone.now(),
-            )
-        except CodigoOTP.DoesNotExist:
-            return Response(
-                {'detail': 'Código incorrecto o expirado. Intenta de nuevo.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # No se consume aquí — es solo el paso de verificación previo a
+        # establecer-contraseña, que es quien realmente lo gasta.
+        otp, error = validar_otp(email, codigo, marcar_usado=False)
+        if error:
+            return Response({'detail': error}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response({'valido': True})
 
@@ -121,6 +115,7 @@ class EstablecerContrasenaView(APIView):
     Crea el usuario Django y devuelve tokens JWT.
     """
     permission_classes = [AllowAny]
+    throttle_classes   = [OTPThrottle]
 
     def post(self, request):
         email    = request.data.get('email', '').strip().lower()
@@ -133,35 +128,33 @@ class EstablecerContrasenaView(APIView):
             return Response({'detail': ' '.join(e.messages)}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            otp = CodigoOTP.objects.get(
-                email=email,
-                codigo=codigo,
-                usado=0,
-                fechaExpiracion__gt=timezone.now(),
-            )
-        except CodigoOTP.DoesNotExist:
-            return Response(
-                {'detail': 'Código inválido. Reinicia el proceso.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        try:
             autorizado = CorreoAutorizado.objects.select_related('unidadAdministrativa').get(email=email, activo=1)
         except CorreoAutorizado.DoesNotExist:
             return Response({'detail': 'Correo no autorizado.'}, status=status.HTTP_401_UNAUTHORIZED)
 
-        try:
-            user = User.objects.create_user(
-                username=email,
-                email=email,
-                password=password,
-                first_name=autorizado.nombre,
-            )
-        except IntegrityError:
-            return Response({'detail': 'Esta cuenta ya fue creada. Intenta iniciar sesión.'}, status=400)
+        # Todo el tramo (validar OTP, crear el usuario, consumir el OTP)
+        # queda dentro de una sola transacción: el select_for_update() de
+        # validar_otp mantiene el registro bloqueado hasta el commit, así
+        # que dos requests concurrentes con el mismo código nunca lo
+        # consumen dos veces (la segunda vuelve a evaluar `usado=0` ya
+        # bloqueada y encuentra el OTP recién gastado por la primera).
+        with transaction.atomic():
+            otp, error = validar_otp(email, codigo, marcar_usado=False)
+            if error:
+                return Response({'detail': error}, status=status.HTTP_400_BAD_REQUEST)
 
-        otp.usado = 1
-        otp.save()
+            try:
+                user = User.objects.create_user(
+                    username=email,
+                    email=email,
+                    password=password,
+                    first_name=autorizado.nombre,
+                )
+            except IntegrityError:
+                return Response({'detail': 'Esta cuenta ya fue creada. Intenta iniciar sesión.'}, status=400)
+
+            otp.usado = 1
+            otp.save(update_fields=['usado'])
 
         refresh = RefreshToken.for_user(user)
         _log(usuario=email, rol=autorizado.rol, accion='REGISTRO', ip=request.META.get('REMOTE_ADDR'))
@@ -340,29 +333,25 @@ class RestablecerContrasenaView(APIView):
         except DjangoValidationError as e:
             return Response({'detail': ' '.join(e.messages)}, status=status.HTTP_400_BAD_REQUEST)
 
-        try:
-            otp = CodigoOTP.objects.get(
-                email=email,
-                codigo=codigo,
-                usado=0,
-                fechaExpiracion__gt=timezone.now(),
-            )
-        except CodigoOTP.DoesNotExist:
-            return Response(
-                {'detail': 'Código incorrecto o expirado.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # Mismo criterio que EstablecerContrasenaView: una sola transacción
+        # desde la validación hasta consumir el OTP, para que el lock de
+        # select_for_update cubra todo el tramo y no se pueda reutilizar el
+        # mismo código con dos requests concurrentes.
+        with transaction.atomic():
+            otp, error = validar_otp(email, codigo, marcar_usado=False)
+            if error:
+                return Response({'detail': error}, status=status.HTTP_400_BAD_REQUEST)
 
-        try:
-            user = User.objects.get(email=email)
-        except User.DoesNotExist:
-            return Response({'detail': 'Usuario no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+            try:
+                user = User.objects.get(email=email)
+            except User.DoesNotExist:
+                return Response({'detail': 'Usuario no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
 
-        user.set_password(password)
-        user.save()
+            user.set_password(password)
+            user.save()
 
-        otp.usado = 1
-        otp.save()
+            otp.usado = 1
+            otp.save(update_fields=['usado'])
 
         autorizado = CorreoAutorizado.objects.filter(email=email, activo=1).first()
         _log(
@@ -402,8 +391,10 @@ class CorreoAutorizadoListView(APIView):
         qs = CorreoAutorizado.objects.select_related('unidadAdministrativa').all().order_by('rol', 'email')
         busqueda = request.query_params.get('search')
         rol      = request.query_params.get('rol')
+        activo   = request.query_params.get('activo')
         if busqueda: qs = qs.filter(email__icontains=busqueda) | qs.filter(nombre__icontains=busqueda)
         if rol:      qs = qs.filter(rol=rol)
+        if activo in ('0', '1'): qs = qs.filter(activo=int(activo))
 
         data = [{
             'id':     c.id,

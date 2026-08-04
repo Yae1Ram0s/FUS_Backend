@@ -12,6 +12,7 @@ from .views import (
     NotificacionListView,
     NotificacionMarcarLeidaView,
     NotificacionMarcarTodasView,
+    NotificacionLimpiarView,
     BitacoraListView,
     ExportarFUSExcelView,
     ExportarFUSPDFView,
@@ -29,9 +30,25 @@ from .views import (
     AtendidoFUSView,
     ConcluirAsuntoView,
     RechazarSolicitudView,
+    ReporteResumenView,
+    ReporteOpcionesView,
+    ReporteExportarExcelView,
+    ReporteExportarPDFView,
+    ReporteExportarPPTXView,
+    ReporteGuardadoListView,
+    ReporteGuardadoDescargarView,
 )
 
 urlpatterns = [
+    # Reportes e inteligencia operativa
+    path('reportes/resumen/',                      ReporteResumenView.as_view(),          name='reportes-resumen'),
+    path('reportes/opciones/',                     ReporteOpcionesView.as_view(),         name='reportes-opciones'),
+    path('reportes/exportar/excel/',               ReporteExportarExcelView.as_view(),    name='reportes-excel'),
+    path('reportes/exportar/pdf/',                 ReporteExportarPDFView.as_view(),      name='reportes-pdf'),
+    path('reportes/exportar/pptx/',                ReporteExportarPPTXView.as_view(),     name='reportes-pptx'),
+    path('reportes/guardados/',                    ReporteGuardadoListView.as_view(),     name='reportes-guardados'),
+    path('reportes/guardados/<int:pk>/descargar/', ReporteGuardadoDescargarView.as_view(), name='reportes-guardado-descargar'),
+
     # FUS
     path('fus/',                               FUSListCreateView.as_view(),      name='fus-list-create'),
     path('fus/<int:pk>/',                      FUSDetailView.as_view(),          name='fus-detail'),
@@ -48,9 +65,10 @@ urlpatterns = [
     path('turnados/<int:turnado_id>/seguimientos/', SeguimientoListCreateView.as_view(), name='seguimientos'),
     path('seguimientos/<int:pk>/',                  SeguimientoDeleteView.as_view(),     name='seguimiento-delete'),
 
-    # Notificaciones (leer-todas debe ir antes que <uuid:pk>)
+    # Notificaciones (leer-todas/limpiar deben ir antes que <uuid:pk>)
     path('notificaciones/',                         NotificacionListView.as_view(),        name='notificaciones'),
     path('notificaciones/leer-todas/',              NotificacionMarcarTodasView.as_view(), name='notificaciones-leer-todas'),
+    path('notificaciones/limpiar/',                 NotificacionLimpiarView.as_view(),     name='notificaciones-limpiar'),
     path('notificaciones/<uuid:pk>/leer/',          NotificacionMarcarLeidaView.as_view(), name='notificacion-leer'),
 
     # Bitácora

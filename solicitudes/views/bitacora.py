@@ -162,12 +162,21 @@ class BitacoraListView(APIView):
 
         from ..serializers import BitacoraSerializer
         pagina = list(qs[offset: offset + page_size])
+        emails_pagina = {r.usuario for r in pagina}
         nombres_map = dict(
-            CorreoAutorizado.objects.filter(
-                email__in={r.usuario for r in pagina}
-            ).values_list('email', 'nombre')
+            CorreoAutorizado.objects.filter(email__in=emails_pagina).values_list('email', 'nombre')
         )
-        data = BitacoraSerializer(pagina, many=True, context={'nombres_map': nombres_map}).data
+        # Una sola consulta para toda la página en vez de una por fila
+        # (BitacoraSerializer.get_unidadAdministrativa antes hacía su propia
+        # consulta por cada renglón renderizado).
+        unidades_map = dict(
+            CorreoAutorizado.objects.filter(email__in=emails_pagina)
+            .select_related('unidadAdministrativa')
+            .values_list('email', 'unidadAdministrativa__unidadAdministrativa')
+        )
+        data = BitacoraSerializer(
+            pagina, many=True, context={'nombres_map': nombres_map, 'unidades_map': unidades_map},
+        ).data
         return Response({
             'total': total, 'page': page, 'page_size': page_size,
             'results': data, 'rol': rol,

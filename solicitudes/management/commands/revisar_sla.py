@@ -14,14 +14,13 @@ manualmente con:
 
     python manage.py revisar_sla
 """
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 
 from solicitudes.models import FUS, Turnado, Notificacion
-from solicitudes.views.turnado import _push_notificacion
-from solicitudes.helpers import notificar_por_correo
+from solicitudes.services import notificar_por_correo, push_notificacion
 
 
 class Command(BaseCommand):
@@ -31,6 +30,17 @@ class Command(BaseCommand):
         ahora = timezone.now()
         hoy = timezone.localtime(ahora).date()
 
+        # Límites de "hoy" en hora local, convertidos a datetime aware — no se
+        # usa el lookup `fechaLimite__date=hoy` porque en MySQL requiere
+        # CONVERT_TZ, que devuelve NULL en silencio si el servidor no tiene
+        # cargadas las tablas de zona horaria (vacía el filtro para todos los
+        # FUS sin ningún error) — mismo problema ya documentado y evitado en
+        # views/bitacora.py:_parse_fecha_local.
+        inicio_hoy = timezone.make_aware(
+            datetime.combine(hoy, time.min), timezone.get_current_timezone(),
+        )
+        fin_hoy = inicio_hoy + timedelta(days=1)
+
         base = FUS.objects.filter(
             activo=1,
             fechaLimite__isnull=False,
@@ -38,13 +48,15 @@ class Command(BaseCommand):
 
         # Límite hoy mismo (día calendario, hora local) — ventana corta de 2h.
         candidatos_hoy = base.filter(
-            fechaLimite__date=hoy,
+            fechaLimite__gte=inicio_hoy,
+            fechaLimite__lt=fin_hoy,
             fechaLimite__gt=ahora,
             fechaLimite__lte=ahora + timedelta(hours=2),
         )
 
         # Límite en un día futuro — ventana de 1 día completo.
-        candidatos_futuro = base.exclude(fechaLimite__date=hoy).filter(
+        candidatos_futuro = base.filter(
+            fechaLimite__gte=fin_hoy,
             fechaLimite__gt=ahora,
             fechaLimite__lte=ahora + timedelta(days=1),
         )
@@ -83,7 +95,7 @@ class Command(BaseCommand):
                     tipoEvento='SLA_POR_VENCER',
                     mensaje=mensaje,
                 )
-                _push_notificacion(notif)
+                push_notificacion(notif)
                 notificar_por_correo(notif)
                 creadas += 1
 

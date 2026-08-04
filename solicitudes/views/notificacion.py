@@ -48,3 +48,11 @@ class NotificacionMarcarTodasView(APIView):
             idDestinatario=request.user, leida=0
         ).update(leida=1, fechaLectura=timezone.now())
         return Response({'detail': 'Todas marcadas como leídas.'})
+
+
+class NotificacionLimpiarView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request):
+        Notificacion.objects.filter(idDestinatario=request.user).delete()
+        return Response({'detail': 'Notificaciones eliminadas.'})

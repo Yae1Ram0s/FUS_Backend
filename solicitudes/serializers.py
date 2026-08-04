@@ -9,13 +9,22 @@ from .permissions import _unidad_id
 
 class UserMiniSerializer(serializers.ModelSerializer):
     nombre = serializers.SerializerMethodField()
+    # Unidad administrativa del usuario — el frontend la usa en TurnadoChip
+    # (el popover de "Turnado a" en Consultar FUS). Antes faltaba aquí, así
+    # que siempre caía en "Sin área asignada" aunque el destinatario sí
+    # tuviera una unidad en CorreoAutorizado.
+    area = serializers.SerializerMethodField()
 
     class Meta:
         model  = User
-        fields = ['id', 'first_name', 'last_name', 'email', 'nombre']
+        fields = ['id', 'first_name', 'last_name', 'email', 'nombre', 'area']
 
     def get_nombre(self, obj):
         return resolver_nombre(obj)
+
+    def get_area(self, obj):
+        area = _resolver_unidad_administrativa(obj)
+        return area if area != 'Sin unidad asignada' else None
 
 
 class MedioMiniSerializer(serializers.ModelSerializer):
@@ -320,8 +329,9 @@ class BitacoraSerializer(serializers.ModelSerializer):
         return self.context.get('nombres_map', {}).get(obj.usuario, '')
 
     def get_unidadAdministrativa(self, obj):
-        user = User.objects.filter(email=obj.usuario).first()
-        return _resolver_unidad_administrativa(user) if user else None
+        # Requiere 'unidades_map' en el context (ver BitacoraListView.get) —
+        # una consulta para toda la página en vez de una por fila.
+        return self.context.get('unidades_map', {}).get(obj.usuario) or 'Sin unidad asignada'
 
     class Meta:
         model  = Bitacora

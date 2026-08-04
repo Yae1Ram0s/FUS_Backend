@@ -7,6 +7,13 @@ class LoginSerializer(serializers.Serializer):
     email    = serializers.EmailField()
     password = serializers.CharField(write_only=True)
 
+    def validate_email(self, value):
+        # Único punto de todo el flujo de auth que no normalizaba el correo
+        # (el resto de las vistas hace `.strip().lower()` a mano) — un correo
+        # con mayúscula o espacio de más (típico de autocompletado en
+        # celular) llegaba tal cual a la comparación exacta en LoginView.
+        return value.strip().lower()
+
 
 class UsuarioROL2Serializer(serializers.ModelSerializer):
     nombre = serializers.SerializerMethodField()
