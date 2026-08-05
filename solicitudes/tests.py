@@ -273,3 +273,22 @@ class FUSTrazabilidadViewTests(_FixtureRolesFUS):
 
     def test_comisionado_no_asignado_404(self):
         self.assertEqual(self._get(self.comisionado_ajeno).status_code, status.HTTP_404_NOT_FOUND)
+
+
+class FUSDetalleAuditoriaViewTests(_FixtureRolesFUS):
+    """El modal de detalle respeta la relación del usuario con el FUS."""
+
+    def _get(self, user):
+        self.client.force_authenticate(user=user)
+        return self.client.get(f'/api/fus/detalle-auditoria/{self.fus.folio}/')
+
+    def test_rol2_destinatario_puede_ver_detalle(self):
+        response = self._get(self.rol2_destinatario)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['folio'], self.fus.folio)
+
+    def test_rol2_ajeno_no_puede_ver_detalle(self):
+        self.assertEqual(
+            self._get(self.rol2_ajeno).status_code,
+            status.HTTP_404_NOT_FOUND,
+        )

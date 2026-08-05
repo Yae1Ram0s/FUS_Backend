@@ -300,29 +300,27 @@ class FUSDetailView(APIView):
 
 
 class FUSDetalleAuditoriaView(APIView):
-    """Detalle de auditoría de un FUS por folio, para el modal de Bitácora (ROL1)."""
+    """Detalle de auditoría visible únicamente para usuarios relacionados al FUS."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request, folio):
         rol = _rol(request.user)
-        if rol not in ROLES_PARTICULAR:
+        if rol not in (*ROLES_PARTICULAR, 'ROL2'):
             return Response({'detail': 'No autorizado.'}, status=403)
-
-        filtros = {'folio': folio, 'activo': 1}
-        if rol == 'EQUIPO_PARTICULAR':
-            propietario = _propietario_fus(request.user)
-            if not propietario:
-                return Response({'detail': 'No autorizado.'}, status=403)
-            filtros['idSolicitanteInterno'] = propietario
 
         fus = get_object_or_404(
             FUS.objects.select_related('idSolicitanteInterno', 'idMedioRecepcion', 'estatusParticular'),
-            **filtros,
+            folio=folio,
+            activo=1,
         )
+        if not _puede_ver_fus(request.user, fus):
+            raise Http404
 
         turnados = Turnado.objects.filter(idFus=fus).select_related(
             'idDestinatario'
         ).prefetch_related('seguimientos').order_by('fechaHoraTurnado')
+        if rol == 'ROL2':
+            turnados = turnados.filter(idDestinatario=request.user, activo=1)
 
         seguimientos = []
         estatus_titular = None
