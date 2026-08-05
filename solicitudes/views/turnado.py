@@ -334,6 +334,12 @@ class MisTurnadosView(APIView):
         estatus_raw = request.query_params.get('estatusTitular')
         prioridad   = request.query_params.get('prioridad')
         search      = request.query_params.get('search')
+        folio       = request.query_params.get('folio')
+        if folio:
+            # Consulta puntual desde dashboard, notificaciones o bitácora.
+            # Se filtra antes de paginar para que el detalle pueda abrirse
+            # aunque el turnado no esté entre los primeros resultados.
+            qs = qs.filter(idFus__folio=folio)
         if prioridad:
             qs = qs.filter(idFus__prioridad=prioridad)
         if estatus_raw:
