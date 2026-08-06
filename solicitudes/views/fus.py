@@ -398,7 +398,7 @@ class DescargarEvidenciaView(APIView):
 
 # ── Descargar FUS individual (PDF) ────────────────────────────────────────────
 
-def generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL1'):
+def generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL1', turnado_id=None):
     """Construye el PDF de un FUS (usado tanto para la descarga directa como
     para el adjunto en las notificaciones por correo). Devuelve los bytes.
 
@@ -406,7 +406,12 @@ def generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL1'):
     de detalle: 'ROL1' (incluye EQUIPO_PARTICULAR) ve la sección "Se turnó"
     y las respuestas como si las hubiera dado el Titular, sin exponer al
     comisionado. 'ROL2' no ve "Se turnó" (ya lo hizo él) pero sí a su
-    comisionado real, con sus respuestas."""
+    comisionado real, con sus respuestas.
+
+    `turnado_id`: si se da, acota "SE TURNÓ"/"RESPUESTA Y SEGUIMIENTO" a un
+    solo destinatario en vez de todos — filtrar la lista de turnados aquí
+    (antes de que ambas secciones la recorran) alcanza para las dos, sin
+    tocar su lógica interna."""
     from reportlab.lib.pagesizes import letter
     from reportlab.platypus import (
         SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
@@ -419,6 +424,8 @@ def generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL1'):
 
     evidencias = [e for e in fus.evidencias.all() if e.activo]
     turnados = [t for t in fus.turnados.all() if t.activo]
+    if turnado_id:
+        turnados = [t for t in turnados if str(t.id) == str(turnado_id)]
 
     LETTERHEAD_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'membretada.png')
 
@@ -760,7 +767,10 @@ class DescargarFUSPDFView(APIView):
 
         rol_visor = 'ROL2' if rol == 'ROL2' else 'ROL1'
         incluir_imagenes = request.query_params.get('imagenes') == '1'
-        pdf_bytes = generar_pdf_fus(fus, incluir_imagenes=incluir_imagenes, rol_visor=rol_visor)
+        turnado_id = request.query_params.get('turnado_id') or None
+        pdf_bytes = generar_pdf_fus(
+            fus, incluir_imagenes=incluir_imagenes, rol_visor=rol_visor, turnado_id=turnado_id,
+        )
         resp = HttpResponse(pdf_bytes, content_type='application/pdf')
         nombre = fus.folio.replace('/', '-')
         resp['Content-Disposition'] = f'attachment; filename="FUS_{nombre}.pdf"'

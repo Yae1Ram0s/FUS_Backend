@@ -65,7 +65,14 @@ def _bitacora_base_qs(request):
         qs = Bitacora.objects.filter(fusFolio__in=list(folios))
     else:
         return Bitacora.objects.none()
-    return qs.exclude(fusFolio__isnull=True).exclude(fusFolio='')
+    # La bitácora ahora se filtra/exporta por Estatus, no por acción — un
+    # registro sin estadoAnterior NI estadoNuevo (ej. REGISTRO_RESPUESTA de
+    # una respuesta que no dispara transición) no tiene nada que mostrar en
+    # esa columna, así que se excluye en vez de dejarlo con "—".
+    return (
+        qs.exclude(fusFolio__isnull=True).exclude(fusFolio='')
+          .exclude(estadoAnterior__isnull=True, estadoNuevo__isnull=True)
+    )
 
 
 def _parse_fecha_local(fecha_str, fin_de_dia=False):
