@@ -14,8 +14,17 @@ from ..helpers import _resolver_unidad_administrativa
 from .helpers import _rol, ROL2_ACCIONES, COMISIONADO_ACCIONES, _metadata_generacion, _propietario_fus
 
 
-BITACORA_COLS_VALIDAS  = ['folio', 'nombre', 'usuario', 'fecha', 'accion', 'estado_ant', 'estado_nuevo', 'observaciones']
-BITACORA_COLS_DEFAULT  = ['folio', 'nombre', 'usuario', 'fecha', 'accion']
+BITACORA_COLS_VALIDAS  = ['folio', 'nombre', 'usuario', 'fecha', 'estatus', 'estado_ant', 'estado_nuevo', 'observaciones']
+BITACORA_COLS_DEFAULT  = ['folio', 'nombre', 'usuario', 'fecha', 'estatus']
+
+# Estatus de FUS que puede quedar en `estadoNuevo` de un registro de bitácora
+# (los mismos nombres crudos que usa FUS.estatusParticular_id) — etiqueta
+# legible compartida por ambos exportadores (antes cada uno traía su propio
+# diccionario de ACCION_LABELS, duplicado e idéntico).
+ESTATUS_LABELS = {
+    'En_seguimiento':       'En seguimiento',
+    'Pendiente_validacion': 'Pendiente de validación',
+}
 
 
 def _parse_columnas_bitacora(request):
@@ -74,7 +83,6 @@ def _parse_fecha_local(fecha_str, fin_de_dia=False):
 
 def _aplicar_filtros_bitacora(qs, params, rol):
     usuario      = params.get('usuario')
-    accion       = params.get('accion')
     folio        = params.get('folio')
     nombre       = params.get('nombre')
     estatus_fus  = params.get('estatus_fus')
@@ -91,7 +99,6 @@ def _aplicar_filtros_bitacora(qs, params, rol):
             qs = qs.filter(fusFolio__icontains=q)
 
     if usuario and rol == 'ROL1': qs = qs.filter(usuario__icontains=usuario)
-    if accion:      qs = qs.filter(accion=accion)
     if folio:       qs = qs.filter(fusFolio__icontains=folio)
 
     if nombre and rol == 'ROL1':
@@ -149,7 +156,7 @@ class BitacoraListView(APIView):
             page, page_size = 1, 50
 
         ORDERING_MAP = {
-            'folio': 'fusFolio', 'fecha': 'fechaHora', 'accion': 'accion',
+            'folio': 'fusFolio', 'fecha': 'fechaHora', 'estatus': 'estadoNuevo',
         }
         if ordering:
             campo = ordering.lstrip('-')
@@ -200,21 +207,6 @@ class ExportarBitacoraExcelView(APIView):
         qs  = _aplicar_filtros_bitacora(qs, request.query_params, rol)
         columnas = _parse_columnas_bitacora(request)
 
-        ACCION_LABELS = {
-            'REGISTRO_FUS': 'Registro FUS', 'TURNAR_FUS': 'Turnar FUS',
-            'ASIGNACION_ESTADO': 'Cambio de estado', 'REGISTRO_RESPUESTA': 'Registro respuesta',
-            'REGISTRO_ACCION': 'Registro acción', 'CONCLUSION_FUS': 'Conclusión FUS',
-            'INICIO_SESION': 'Inicio sesión', 'CIERRE_SESION': 'Cierre sesión',
-            'RESTABLECER_CONTRASENA': 'Restablecer contraseña',
-            'ELIMINACION': 'Eliminación',
-            'ASIGNACION_COMISIONADO': 'Asignación a comisionado',
-            'SEGUIMIENTO_COMISIONADO': 'Seguimiento de comisionado',
-            'FINALIZACION_SEGUIMIENTO': 'Finalización de seguimiento',
-            'ATENCION_FUS': 'Atención de FUS (comisionado)',
-            'APROBACION_FUS': 'Aprobación de FUS',
-            'RECHAZO_FUS': 'Rechazo de FUS',
-            'REAPERTURA_FUS': 'Reapertura de FUS',
-        }
         nombres_map = dict(
             CorreoAutorizado.objects.filter(
                 email__in=qs.values_list('usuario', flat=True).distinct()
@@ -225,7 +217,7 @@ class ExportarBitacoraExcelView(APIView):
             'nombre':        ('Nombre',          lambda r: nombres_map.get(r.usuario, '')),
             'usuario':       ('Usuario',         lambda r: r.usuario),
             'fecha':         ('Fecha y hora',    lambda r: r.fechaHora.strftime('%d/%m/%Y %H:%M:%S') if r.fechaHora else ''),
-            'accion':        ('Acción',          lambda r: ACCION_LABELS.get(r.accion, r.accion)),
+            'estatus':       ('Estatus',         lambda r: ESTATUS_LABELS.get(r.estadoNuevo or r.estadoAnterior, r.estadoNuevo or r.estadoAnterior or '')),
             'estado_ant':    ('Estado anterior', lambda r: r.estadoAnterior or ''),
             'estado_nuevo':  ('Estado nuevo',    lambda r: r.estadoNuevo or ''),
             'observaciones': ('Observaciones',   lambda r: r.observaciones or ''),
@@ -335,21 +327,6 @@ class ExportarBitacoraPDFView(APIView):
         qs  = _aplicar_filtros_bitacora(qs, request.query_params, rol)
         columnas = _parse_columnas_bitacora(request)
 
-        ACCION_LABELS = {
-            'REGISTRO_FUS': 'Registro FUS', 'TURNAR_FUS': 'Turnar FUS',
-            'ASIGNACION_ESTADO': 'Cambio de estado', 'REGISTRO_RESPUESTA': 'Registro respuesta',
-            'REGISTRO_ACCION': 'Registro acción', 'CONCLUSION_FUS': 'Conclusión FUS',
-            'INICIO_SESION': 'Inicio sesión', 'CIERRE_SESION': 'Cierre sesión',
-            'RESTABLECER_CONTRASENA': 'Restablecer contraseña',
-            'ELIMINACION': 'Eliminación',
-            'ASIGNACION_COMISIONADO': 'Asignación a comisionado',
-            'SEGUIMIENTO_COMISIONADO': 'Seguimiento de comisionado',
-            'FINALIZACION_SEGUIMIENTO': 'Finalización de seguimiento',
-            'ATENCION_FUS': 'Atención de FUS (comisionado)',
-            'APROBACION_FUS': 'Aprobación de FUS',
-            'RECHAZO_FUS': 'Rechazo de FUS',
-            'REAPERTURA_FUS': 'Reapertura de FUS',
-        }
         nombres_map = dict(
             CorreoAutorizado.objects.filter(
                 email__in=qs.values_list('usuario', flat=True).distinct()
@@ -364,7 +341,7 @@ class ExportarBitacoraPDFView(APIView):
             'nombre':        ('Nombre',        lambda r: nombres_map.get(r.usuario, '—')),
             'usuario':       ('Usuario',       lambda r: r.usuario),
             'fecha':         ('Fecha y hora',  lambda r: r.fechaHora.strftime('%d/%m/%Y %H:%M') if r.fechaHora else '—'),
-            'accion':        ('Acción',        lambda r: ACCION_LABELS.get(r.accion, r.accion)),
+            'estatus':       ('Estatus',       lambda r: ESTATUS_LABELS.get(r.estadoNuevo or r.estadoAnterior, r.estadoNuevo or r.estadoAnterior or '—')),
             'estado_ant':    ('Estado ant.',   lambda r: r.estadoAnterior or '—'),
             'estado_nuevo':  ('Estado nuevo',  lambda r: r.estadoNuevo or '—'),
             'observaciones': ('Observaciones', lambda r: r.observaciones or '—'),
