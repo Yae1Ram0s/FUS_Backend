@@ -292,3 +292,145 @@ class FUSDetalleAuditoriaViewTests(_FixtureRolesFUS):
             self._get(self.rol2_ajeno).status_code,
             status.HTTP_404_NOT_FOUND,
         )
+
+
+class ValidacionPorPersonaTurnadoTests(APITestCase):
+    """FUS turnado a varias personas (sin comisionado): cada Titular avanza
+    su propio turnado (responder -> marcar atendido) de forma independiente,
+    y el Particular rechaza/concluye la parte de UNA persona sin afectar a
+    las demás — el FUS solo pasa a 'Concluido' cuando TODOS los turnados
+    activos ya están concluidos."""
+
+    @classmethod
+    def setUpTestData(cls):
+        for clave in ('Turnado', 'En_seguimiento', 'Atendido', 'Concluido', 'Rechazado'):
+            Estatus.objects.get_or_create(
+                clave=clave, defaults={'nombre': clave, 'tipoFlujo': 'PARTICULAR', 'orden': 1},
+            )
+        cls.medio = MedioRecepcion.objects.create(nombreMedio='Correo electrónico', paraTurnado=1)
+
+        cls.rol1 = User.objects.create_user(username='rol1@t.mx', email='rol1@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rol1@t.mx', nombre='Rol1', rol='ROL1', activo=1)
+
+        cls.mariana = User.objects.create_user(username='mariana@t.mx', email='mariana@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='mariana@t.mx', nombre='Mariana', rol='ROL2', activo=1)
+
+        cls.lucia = User.objects.create_user(username='lucia@t.mx', email='lucia@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='lucia@t.mx', nombre='Lucía', rol='ROL2', activo=1)
+
+        cls.fus = FUS.objects.create(
+            folio='ANAM/PARTICULAR/FUS/0200/2026',
+            idSolicitanteInterno=cls.rol1,
+            descripcion='Solicitud turnada a dos personas', contexto='',
+            estatusParticular_id='Turnado',
+            idUsuarioRegistra=cls.rol1.id,
+        )
+        cls.t_mariana = Turnado.objects.create(
+            idFus=cls.fus, idRemitente=cls.rol1, idDestinatario=cls.mariana,
+            idMedio=cls.medio, estatusTitular_id='Recibido', activo=1,
+        )
+        cls.t_lucia = Turnado.objects.create(
+            idFus=cls.fus, idRemitente=cls.rol1, idDestinatario=cls.lucia,
+            idMedio=cls.medio, estatusTitular_id='Recibido', activo=1,
+        )
+
+    def _responder(self, user, turnado):
+        self.client.force_authenticate(user=user)
+        return self.client.post(
+            f'/api/turnados/{turnado.id}/seguimientos/',
+            {'descripcionActividad': 'Reviso el caso', 'accionTexto': ''},
+        )
+
+    def _atendido(self, user, turnado):
+        self.client.force_authenticate(user=user)
+        return self.client.post(f'/api/turnados/{turnado.id}/atendido/')
+
+    def _concluir_persona(self, user, turnado):
+        self.client.force_authenticate(user=user)
+        return self.client.post(f'/api/turnados/{turnado.id}/concluir-persona/')
+
+    def _rechazar_persona(self, user, turnado, motivo='No es suficiente'):
+        self.client.force_authenticate(user=user)
+        return self.client.post(f'/api/turnados/{turnado.id}/rechazar-persona/', {'motivo': motivo})
+
+    def test_atendido_solo_afecta_su_propio_turnado(self):
+        self._responder(self.mariana, self.t_mariana)
+        resp = self._atendido(self.mariana, self.t_mariana)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        self.t_mariana.refresh_from_db()
+        self.t_lucia.refresh_from_db()
+        self.fus.refresh_from_db()
+        self.assertEqual(self.t_mariana.estatusTitular_id, 'Atendido')
+        self.assertEqual(self.t_lucia.estatusTitular_id, 'Recibido')  # sin tocar
+        self.assertEqual(self.fus.estatusParticular_id, 'Atendido')
+
+    def test_rol2_no_puede_marcar_atendido_sin_responder_antes(self):
+        resp = self._atendido(self.mariana, self.t_mariana)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_rol2_ajeno_no_puede_marcar_atendido_de_otro_turnado(self):
+        self._responder(self.mariana, self.t_mariana)
+        resp = self._atendido(self.lucia, self.t_mariana)
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_rol1_no_puede_concluir_antes_de_atendido(self):
+        self._responder(self.mariana, self.t_mariana)
+        resp = self._concluir_persona(self.rol1, self.t_mariana)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_rol2_no_puede_concluir_la_parte_de_otra_persona(self):
+        self._responder(self.mariana, self.t_mariana)
+        self._atendido(self.mariana, self.t_mariana)
+        resp = self._concluir_persona(self.mariana, self.t_mariana)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_fus_sigue_atendido_hasta_que_todas_las_personas_concluyen(self):
+        # Mariana responde, marca atendido, Rol 1 la concluye — Lucía sigue pendiente.
+        self._responder(self.mariana, self.t_mariana)
+        self._atendido(self.mariana, self.t_mariana)
+        resp = self._concluir_persona(self.rol1, self.t_mariana)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        self.t_mariana.refresh_from_db()
+        self.fus.refresh_from_db()
+        self.assertEqual(self.t_mariana.estatusTitular_id, 'Concluido')
+        self.assertEqual(self.fus.estatusParticular_id, 'Atendido')  # todavía no, falta Lucía
+
+        # Lucía responde, marca atendido, Rol 1 la concluye -> ahora sí el FUS completo
+        self._responder(self.lucia, self.t_lucia)
+        self._atendido(self.lucia, self.t_lucia)
+        resp = self._concluir_persona(self.rol1, self.t_lucia)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        self.t_lucia.refresh_from_db()
+        self.fus.refresh_from_db()
+        self.assertEqual(self.t_lucia.estatusTitular_id, 'Concluido')
+        self.assertEqual(self.fus.estatusParticular_id, 'Concluido')
+        self.assertIsNotNone(self.fus.fechaConclusion)
+
+    def test_rechazar_persona_solo_afecta_su_propio_turnado(self):
+        self._responder(self.mariana, self.t_mariana)
+        self._atendido(self.mariana, self.t_mariana)
+        resp = self._rechazar_persona(self.rol1, self.t_mariana, motivo='Falta información')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+        self.t_mariana.refresh_from_db()
+        self.t_lucia.refresh_from_db()
+        self.fus.refresh_from_db()
+        self.assertEqual(self.t_mariana.estatusTitular_id, 'Rechazado')
+        self.assertEqual(self.t_lucia.estatusTitular_id, 'Recibido')       # ajena, sin tocar
+        self.assertEqual(self.fus.estatusParticular_id, 'Atendido')        # el FUS no se rechaza completo
+
+    def test_rechazar_persona_requiere_motivo(self):
+        self._responder(self.mariana, self.t_mariana)
+        self._atendido(self.mariana, self.t_mariana)
+        self.client.force_authenticate(user=self.rol1)
+        resp = self.client.post(f'/api/turnados/{self.t_mariana.id}/rechazar-persona/', {'motivo': '  '})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_rol2_ajeno_no_puede_validar(self):
+        self._responder(self.mariana, self.t_mariana)
+        self._atendido(self.mariana, self.t_mariana)
+        resp = self._concluir_persona(self.lucia, self.t_mariana)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)

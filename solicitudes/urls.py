@@ -6,6 +6,9 @@ from .views import (
     FUSActividadView,
     FUSDetalleAuditoriaView,
     ConcluirTurnadoView,
+    MarcarTurnadoAtendidoView,
+    ConcluirPersonaTurnadoView,
+    RechazarPersonaTurnadoView,
     MisTurnadosView,
     SeguimientoListCreateView,
     SeguimientoDeleteView,
@@ -60,6 +63,9 @@ urlpatterns = [
     # Turnados ROL2
     path('turnados/mis-turnados/',             MisTurnadosView.as_view(),        name='mis-turnados'),
     path('turnados/<int:pk>/concluir/',        ConcluirTurnadoView.as_view(),    name='turnado-concluir'),
+    path('turnados/<int:pk>/atendido/',        MarcarTurnadoAtendidoView.as_view(),  name='turnado-atendido'),
+    path('turnados/<int:pk>/concluir-persona/', ConcluirPersonaTurnadoView.as_view(), name='turnado-concluir-persona'),
+    path('turnados/<int:pk>/rechazar-persona/', RechazarPersonaTurnadoView.as_view(), name='turnado-rechazar-persona'),
 
     # Seguimientos
     path('turnados/<int:turnado_id>/seguimientos/', SeguimientoListCreateView.as_view(), name='seguimientos'),

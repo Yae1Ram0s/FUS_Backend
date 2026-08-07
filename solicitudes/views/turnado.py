@@ -192,6 +192,17 @@ class FUSActividadView(APIView):
         return Response(data)
 
 
+def _resolver_actor_seguimiento(seguimiento, actor_por_defecto):
+    """Nombre de quien de verdad registró este Seguimiento — normalmente
+    coincide con el Titular del turnado (actor_por_defecto), salvo en los
+    marcadores de Concluir/Rechazar por persona, que los ejecuta el
+    Particular sobre el turnado de otra persona."""
+    if not seguimiento.idUsuarioRegistra:
+        return actor_por_defecto
+    usuario = User.objects.filter(pk=seguimiento.idUsuarioRegistra).first()
+    return resolver_nombre(usuario) if usuario else actor_por_defecto
+
+
 class FUSTrazabilidadView(APIView):
     """Línea de tiempo completa de un FUS: creación, turnado(s), comisión y
     respuestas (tanto del flujo directo de Rol 2 como del de Comisionado),
@@ -245,15 +256,31 @@ class FUSTrazabilidadView(APIView):
                     'detalle': f'Turnado a {actor}' if actor else 'Turnado',
                 })
 
-            # Flujo directo (legacy, sin comisionado): respuestas del propio Titular.
+            # Flujo directo (legacy, sin comisionado): respuestas del propio Titular,
+            # más los marcadores de auditoría de MarcarTurnadoAtendidoView/
+            # ConcluirPersonaTurnadoView/RechazarPersonaTurnadoView (mismo modelo
+            # Seguimiento, se distinguen por el texto porque Seguimiento no tiene
+            # un campo `tipo` como sí tiene SeguimientoRespuesta). El actor de
+            # estos tres es quien de verdad ejecutó la acción (idUsuarioRegistra)
+            # — no siempre es el Titular del turnado, ya que Concluir/Rechazar
+            # las hace el Particular sobre la parte de otra persona.
             segs = [s for s in t.seguimientos.all() if s.activo]
             for i, s in enumerate(segs):
-                es_final = i == len(segs) - 1
-                tipo = 'concluido' if (es_final and t.estatusTitular_id == 'Concluido') else 'respuesta'
+                texto = s.descripcionActividad or ''
+                if texto.startswith('Rechazado por el Particular:'):
+                    tipo, actor_evento = 'rechazo', _resolver_actor_seguimiento(s, actor)
+                elif texto == 'Concluido por el Particular.':
+                    tipo, actor_evento = 'concluido', _resolver_actor_seguimiento(s, actor)
+                elif texto.startswith('Atendido:'):
+                    tipo, actor_evento = 'atendido', actor
+                else:
+                    es_final = i == len(segs) - 1
+                    tipo = 'concluido' if (es_final and t.estatusTitular_id == 'Concluido') else 'respuesta'
+                    actor_evento = actor
                 eventos.append({
                     'tipo':    tipo,
                     'fecha':   s.fechaRegistro,
-                    'actor':   actor,
+                    'actor':   actor_evento,
                     'detalle': s.descripcionActividad,
                 })
 
@@ -470,6 +497,237 @@ class ConcluirTurnadoView(APIView):
                  estado_ant=est_ant_fus, estado_nuevo='Concluido')
 
         return Response({'detail': 'Asunto concluido correctamente.'})
+
+
+class MarcarTurnadoAtendidoView(APIView):
+    """POST — el Titular (Rol 2) confirma que su parte ya está lista para
+    que el Particular la valide (Rechazar/Concluir). Solo toca SU turnado:
+    en un FUS con varias personas, cada quien avanza su propia respuesta de
+    forma independiente, sin sincronizarse con los demás — a diferencia de
+    AtendidoFUSView (flujo de Comisionado), que sí sincroniza todos los
+    turnados porque ahí solo hay un comisionado detrás."""
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def post(self, request, pk):
+        turnado = get_object_or_404(
+            Turnado.objects.select_for_update().select_related('idFus'),
+            pk=pk, activo=1, idDestinatario=request.user,
+        )
+        if turnado.estatusTitular_id != 'En_seguimiento':
+            return Response(
+                {'detail': 'Registra al menos una respuesta antes de marcar tu parte como atendida.'},
+                status=400,
+            )
+
+        user = request.user
+        ip   = request.META.get('REMOTE_ADDR')
+        rol  = _rol(user)
+        est_ant = turnado.estatusTitular_id
+
+        turnado.estatusTitular_id = 'Atendido'
+        turnado.idUsuarioModifica = user.id
+        turnado.save()
+
+        # Marcador de auditoría — sin esto, "marcar como atendido" no queda
+        # registrado en ningún lado ligado a ESTE turnado en particular (a
+        # diferencia de Bitácora, que no distingue turnado si el FUS tiene
+        # varios); FUSTrazabilidadView lo detecta por el texto para mostrarlo
+        # en el historial con su propio ícono, en vez de como "respuesta".
+        Seguimiento.objects.create(
+            idTurnado=turnado,
+            descripcionActividad='Atendido: listo para validación del Particular.',
+            idUsuarioRegistra=user.id,
+        )
+
+        fus = turnado.idFus
+        # El FUS se marca "Atendido" con la primera persona que llega ahí —
+        # se queda en ese estatus mientras haya cualquier turnado pendiente,
+        # sin importar cuántos otros ya se hayan concluido individualmente.
+        if fus.estatusParticular_id == 'Turnado':
+            fus.estatusParticular_id = 'Atendido'
+            fus.idUsuarioModifica = user.id
+            fus.save()
+
+        _log(usuario=user.email, rol=rol, accion='ASIGNACION_ESTADO',
+             ip=ip, folio=fus.folio, estado_ant=est_ant, estado_nuevo='Atendido')
+
+        titular_auth = CorreoAutorizado.objects.filter(email=user.email, activo=1).first()
+        nombre_titular = titular_auth.nombre if titular_auth else (user.first_name or user.email)
+        _notif = Notificacion.objects.create(
+            idDestinatario=fus.idSolicitanteInterno,
+            fusFolio=fus.folio,
+            tipoEvento='SEGUIMIENTO_FINALIZADO',
+            mensaje=f"{nombre_titular} marcó su parte del FUS {fus.folio} como atendida.",
+        )
+        push_notificacion(_notif)
+        notificar_por_correo(_notif)
+
+        return Response({
+            'detail': 'Marcado como atendido.',
+            'estatusTitular': turnado.estatusTitular_id,
+            'estatusParticular': fus.estatusParticular_id,
+        })
+
+
+def _validar_rol1_de_turnado(request, turnado):
+    """Rol 1 (o su EQUIPO_PARTICULAR) dueño del FUS al que pertenece este
+    turnado — mismo criterio que EsRol1DuenoDelFUS, aplicado sobre el FUS
+    del turnado en vez de recibir el FUS directo."""
+    if _rol(request.user) not in ('ROL1', 'EQUIPO_PARTICULAR'):
+        return False
+    return _propietario_fus(request.user) == turnado.idFus.idSolicitanteInterno
+
+
+class ConcluirPersonaTurnadoView(APIView):
+    """POST — el Particular (Rol 1) valida y concluye la parte de UNA
+    persona específica de un FUS turnado a varias. El FUS completo solo pasa
+    a 'Concluido' cuando TODOS los turnados activos ya están concluidos —
+    mientras haya alguno pendiente se queda en 'Atendido' (ver
+    MarcarTurnadoAtendidoView), reflejando que el trámite sigue abierto."""
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def post(self, request, pk):
+        turnado = get_object_or_404(
+            Turnado.objects.select_for_update().select_related('idFus'),
+            pk=pk, activo=1,
+        )
+        if not _validar_rol1_de_turnado(request, turnado):
+            return Response({'detail': 'No autorizado.'}, status=403)
+
+        fus = FUS.objects.select_for_update().get(pk=turnado.idFus_id)
+        turnado.idFus = fus
+
+        if turnado.estatusTitular_id != 'Atendido':
+            return Response(
+                {'detail': 'Esta persona todavía no marca su parte como atendida.'},
+                status=400,
+            )
+
+        user    = request.user
+        ip      = request.META.get('REMOTE_ADDR')
+        rol     = _rol(user)
+        est_ant = turnado.estatusTitular_id
+
+        turnado.estatusTitular_id = 'Concluido'
+        turnado.idUsuarioModifica = user.id
+        turnado.save()
+
+        Seguimiento.objects.create(
+            idTurnado=turnado,
+            descripcionActividad='Concluido por el Particular.',
+            idUsuarioRegistra=user.id,
+        )
+
+        _log(usuario=user.email, rol=rol, accion='CONCLUSION_FUS',
+             ip=ip, folio=fus.folio, estado_ant=est_ant, estado_nuevo='Concluido')
+
+        destinatario_turnado = turnado.idDestinatario
+        if destinatario_turnado:
+            concluye_auth = CorreoAutorizado.objects.filter(email=user.email, activo=1).first()
+            nombre_concluye = concluye_auth.nombre if concluye_auth else (user.first_name or user.email)
+            _notif = Notificacion.objects.create(
+                idDestinatario=destinatario_turnado,
+                fusFolio=fus.folio,
+                tipoEvento='SOLICITUD_APROBADA',
+                mensaje=f"{nombre_concluye} concluyó tu parte del FUS {fus.folio}.",
+            )
+            push_notificacion(_notif)
+            notificar_por_correo(_notif)
+
+        # Si TODOS los turnados activos del FUS están concluidos → FUS pasa a Concluido
+        pendientes = fus.turnados.filter(activo=1).exclude(estatusTitular_id='Concluido').count()
+        if pendientes == 0:
+            est_ant_fus              = fus.estatusParticular_id
+            fus.estatusParticular_id = 'Concluido'
+            fus.fechaConclusion      = timezone.now()
+            fus.idUsuarioModifica    = user.id
+            fus.save()
+
+            _notif_fus = Notificacion.objects.create(
+                idDestinatario=fus.idSolicitanteInterno,
+                fusFolio=fus.folio,
+                tipoEvento='CONCLUIDO',
+                mensaje=f"El FUS {fus.folio} fue concluido — todas las personas turnadas atendieron su parte.",
+            )
+            push_notificacion(_notif_fus)
+            notificar_por_correo(_notif_fus)
+
+            _log(usuario=user.email, rol=rol, accion='ASIGNACION_ESTADO',
+                 ip=ip, folio=fus.folio, estado_ant=est_ant_fus, estado_nuevo='Concluido')
+
+        return Response({
+            'detail': 'Concluido correctamente.',
+            'estatusTitular': turnado.estatusTitular_id,
+            'estatusParticular': fus.estatusParticular_id,
+        })
+
+
+class RechazarPersonaTurnadoView(APIView):
+    """POST {motivo} — el Particular (Rol 1) rechaza la parte de UNA persona
+    específica: solo el turnado de esa persona vuelve a quedar pendiente de
+    respuesta (se reabre a 'En_seguimiento' en cuanto vuelva a responder,
+    mismo criterio que la reapertura automática tras un rechazo general) —
+    no afecta a las demás personas ni al estatus general del FUS."""
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def post(self, request, pk):
+        turnado = get_object_or_404(
+            Turnado.objects.select_for_update().select_related('idFus'),
+            pk=pk, activo=1,
+        )
+        if not _validar_rol1_de_turnado(request, turnado):
+            return Response({'detail': 'No autorizado.'}, status=403)
+
+        motivo = (request.data.get('motivo') or '').strip()
+        if not motivo:
+            return Response({'detail': 'Escribe un motivo antes de rechazar.'}, status=400)
+
+        if turnado.estatusTitular_id != 'Atendido':
+            return Response(
+                {'detail': 'Esta persona todavía no marca su parte como atendida.'},
+                status=400,
+            )
+
+        user    = request.user
+        ip      = request.META.get('REMOTE_ADDR')
+        rol     = _rol(user)
+        fus     = turnado.idFus
+        est_ant = turnado.estatusTitular_id
+
+        turnado.estatusTitular_id = 'Rechazado'
+        turnado.idUsuarioModifica = user.id
+        turnado.save()
+
+        Seguimiento.objects.create(
+            idTurnado=turnado,
+            descripcionActividad=f'Rechazado por el Particular: {motivo}',
+            idUsuarioRegistra=user.id,
+        )
+
+        _log(usuario=user.email, rol=rol, accion='RECHAZO_FUS',
+             ip=ip, folio=fus.folio, estado_ant=est_ant, estado_nuevo='Rechazado', obs=motivo)
+
+        destinatario_turnado = turnado.idDestinatario
+        if destinatario_turnado:
+            rechaza_auth = CorreoAutorizado.objects.filter(email=user.email, activo=1).first()
+            nombre_rechaza = rechaza_auth.nombre if rechaza_auth else (user.first_name or user.email)
+            _notif = Notificacion.objects.create(
+                idDestinatario=destinatario_turnado,
+                fusFolio=fus.folio,
+                tipoEvento='CAMBIO_ESTADO',
+                mensaje=f"{nombre_rechaza} rechazó tu respuesta del FUS {fus.folio}: \"{motivo}\"",
+            )
+            push_notificacion(_notif)
+            notificar_por_correo(_notif)
+
+        return Response({
+            'detail': 'Rechazado correctamente.',
+            'estatusTitular': turnado.estatusTitular_id,
+            'estatusParticular': fus.estatusParticular_id,
+        })
 
 
 # ── Seguimientos ─────────────────────────────────────────────────────────────
