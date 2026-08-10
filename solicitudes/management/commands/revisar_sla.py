@@ -21,6 +21,7 @@ from django.utils import timezone
 
 from solicitudes.models import FUS, Turnado, Notificacion
 from solicitudes.services import notificar_por_correo, push_notificacion
+from solicitudes.utils import _equipo_particular_de
 
 
 class Command(BaseCommand):
@@ -80,11 +81,12 @@ class Command(BaseCommand):
                 idFus=fus, activo=1
             ).exclude(estatusTitular_id='Concluido').first()
 
-            destinatarios = []
+            destinatarios = set()
             if fus.idSolicitanteInterno_id:
-                destinatarios.append(fus.idSolicitanteInterno)
+                destinatarios.add(fus.idSolicitanteInterno)
+                destinatarios |= set(_equipo_particular_de(fus.idSolicitanteInterno))
             if turnado_activo and turnado_activo.idDestinatario_id:
-                destinatarios.append(turnado_activo.idDestinatario)
+                destinatarios.add(turnado_activo.idDestinatario)
 
             mensaje = f"El FUS {fus.folio} está por vencer (límite: {fus.fechaLimite})."
 

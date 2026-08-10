@@ -398,7 +398,7 @@ class DescargarEvidenciaView(APIView):
 
 # ── Descargar FUS individual (PDF) ────────────────────────────────────────────
 
-def generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL1', turnado_id=None):
+def generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL1', turnado_id=None, solo_destinatario_id=None):
     """Construye el PDF de un FUS (usado tanto para la descarga directa como
     para el adjunto en las notificaciones por correo). Devuelve los bytes.
 
@@ -411,7 +411,14 @@ def generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL1', turnado_id=No
     `turnado_id`: si se da, acota "SE TURNÓ"/"RESPUESTA Y SEGUIMIENTO" a un
     solo destinatario en vez de todos — filtrar la lista de turnados aquí
     (antes de que ambas secciones la recorran) alcanza para las dos, sin
-    tocar su lógica interna."""
+    tocar su lógica interna.
+
+    `solo_destinatario_id`: cuando `rol_visor='ROL2'` este parámetro es la
+    única fuente de verdad de qué turnados puede ver el llamante — se aplica
+    SIEMPRE, sin importar `turnado_id` (que puede venir de un query param
+    controlado por el cliente), para que un Titular nunca pueda pedir el PDF
+    filtrado a un `turnado_id` que no es el suyo y ver así las respuestas de
+    otro Titular en el mismo FUS."""
     from reportlab.lib.pagesizes import letter
     from reportlab.platypus import (
         SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
@@ -424,7 +431,9 @@ def generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL1', turnado_id=No
 
     evidencias = [e for e in fus.evidencias.all() if e.activo]
     turnados = [t for t in fus.turnados.all() if t.activo]
-    if turnado_id:
+    if solo_destinatario_id is not None:
+        turnados = [t for t in turnados if t.idDestinatario_id == solo_destinatario_id]
+    elif turnado_id:
         turnados = [t for t in turnados if str(t.id) == str(turnado_id)]
 
     LETTERHEAD_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'membretada.png')
@@ -768,8 +777,14 @@ class DescargarFUSPDFView(APIView):
         rol_visor = 'ROL2' if rol == 'ROL2' else 'ROL1'
         incluir_imagenes = request.query_params.get('imagenes') == '1'
         turnado_id = request.query_params.get('turnado_id') or None
+        # Un Titular (ROL2) solo puede ver sus propios turnados: se ignora
+        # cualquier `turnado_id` que venga del cliente y se fuerza el filtro
+        # por su propio usuario, para que no pueda pedir el PDF de la parte
+        # de otro Titular en el mismo FUS (ver docstring de generar_pdf_fus).
+        solo_destinatario_id = request.user.id if rol == 'ROL2' else None
         pdf_bytes = generar_pdf_fus(
-            fus, incluir_imagenes=incluir_imagenes, rol_visor=rol_visor, turnado_id=turnado_id,
+            fus, incluir_imagenes=incluir_imagenes, rol_visor=rol_visor,
+            turnado_id=turnado_id, solo_destinatario_id=solo_destinatario_id,
         )
         resp = HttpResponse(pdf_bytes, content_type='application/pdf')
         nombre = fus.folio.replace('/', '-')

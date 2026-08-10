@@ -17,7 +17,7 @@ from ..serializers import (
     TurnadoSerializer, TurnadoActividadSerializer, SeguimientoSerializer,
     SeguimientoComisionadoComoActividadSerializer,
 )
-from ..utils import resolver_nombre
+from ..utils import resolver_nombre, _equipo_particular_de
 from ..services import notificar_por_correo, push_notificacion
 from .comisionado import _quien_comisiono
 from .helpers import (
@@ -483,14 +483,17 @@ class ConcluirTurnadoView(APIView):
 
             concluye_auth = CorreoAutorizado.objects.filter(email=user.email, activo=1).first()
             nombre_concluye = concluye_auth.nombre if concluye_auth else (user.first_name or user.email)
-            _notif = Notificacion.objects.create(
-                idDestinatario=fus.idSolicitanteInterno,
-                fusFolio=fus.folio,
-                tipoEvento='CONCLUIDO',
-                mensaje=f"{nombre_concluye} ha concluido el FUS {fus.folio}.",
-            )
-            push_notificacion(_notif)
-            notificar_por_correo(_notif)
+            destinatarios = {fus.idSolicitanteInterno} | set(_equipo_particular_de(fus.idSolicitanteInterno))
+            destinatarios.discard(user)
+            for destinatario in destinatarios:
+                _notif = Notificacion.objects.create(
+                    idDestinatario=destinatario,
+                    fusFolio=fus.folio,
+                    tipoEvento='CONCLUIDO',
+                    mensaje=f"{nombre_concluye} ha concluido el FUS {fus.folio}.",
+                )
+                push_notificacion(_notif)
+                notificar_por_correo(_notif)
 
             _log(usuario=user.email, rol=rol, accion='ASIGNACION_ESTADO',
                  ip=ip, folio=fus.folio,
@@ -525,7 +528,7 @@ class MarcarTurnadoAtendidoView(APIView):
         rol  = _rol(user)
         est_ant = turnado.estatusTitular_id
 
-        turnado.estatusTitular_id = 'Atendido'
+        turnado.estatusTitular_id = 'Pendiente_validacion'
         turnado.idUsuarioModifica = user.id
         turnado.save()
 
@@ -554,14 +557,17 @@ class MarcarTurnadoAtendidoView(APIView):
 
         titular_auth = CorreoAutorizado.objects.filter(email=user.email, activo=1).first()
         nombre_titular = titular_auth.nombre if titular_auth else (user.first_name or user.email)
-        _notif = Notificacion.objects.create(
-            idDestinatario=fus.idSolicitanteInterno,
-            fusFolio=fus.folio,
-            tipoEvento='SEGUIMIENTO_FINALIZADO',
-            mensaje=f"{nombre_titular} marcó su parte del FUS {fus.folio} como atendida.",
-        )
-        push_notificacion(_notif)
-        notificar_por_correo(_notif)
+        destinatarios = {fus.idSolicitanteInterno} | set(_equipo_particular_de(fus.idSolicitanteInterno))
+        destinatarios.discard(user)
+        for destinatario in destinatarios:
+            _notif = Notificacion.objects.create(
+                idDestinatario=destinatario,
+                fusFolio=fus.folio,
+                tipoEvento='SEGUIMIENTO_FINALIZADO',
+                mensaje=f"{nombre_titular} marcó su parte del FUS {fus.folio} como atendida.",
+            )
+            push_notificacion(_notif)
+            notificar_por_correo(_notif)
 
         return Response({
             'detail': 'Marcado como atendido.',
@@ -599,7 +605,7 @@ class ConcluirPersonaTurnadoView(APIView):
         fus = FUS.objects.select_for_update().get(pk=turnado.idFus_id)
         turnado.idFus = fus
 
-        if turnado.estatusTitular_id != 'Atendido':
+        if turnado.estatusTitular_id != 'Pendiente_validacion':
             return Response(
                 {'detail': 'Esta persona todavía no marca su parte como atendida.'},
                 status=400,
@@ -645,14 +651,17 @@ class ConcluirPersonaTurnadoView(APIView):
             fus.idUsuarioModifica    = user.id
             fus.save()
 
-            _notif_fus = Notificacion.objects.create(
-                idDestinatario=fus.idSolicitanteInterno,
-                fusFolio=fus.folio,
-                tipoEvento='CONCLUIDO',
-                mensaje=f"El FUS {fus.folio} fue concluido — todas las personas turnadas atendieron su parte.",
-            )
-            push_notificacion(_notif_fus)
-            notificar_por_correo(_notif_fus)
+            destinatarios_fus = {fus.idSolicitanteInterno} | set(_equipo_particular_de(fus.idSolicitanteInterno))
+            destinatarios_fus.discard(user)
+            for destinatario in destinatarios_fus:
+                _notif_fus = Notificacion.objects.create(
+                    idDestinatario=destinatario,
+                    fusFolio=fus.folio,
+                    tipoEvento='CONCLUIDO',
+                    mensaje=f"El FUS {fus.folio} fue concluido — todas las personas turnadas atendieron su parte.",
+                )
+                push_notificacion(_notif_fus)
+                notificar_por_correo(_notif_fus)
 
             _log(usuario=user.email, rol=rol, accion='ASIGNACION_ESTADO',
                  ip=ip, folio=fus.folio, estado_ant=est_ant_fus, estado_nuevo='Concluido')
@@ -685,7 +694,7 @@ class RechazarPersonaTurnadoView(APIView):
         if not motivo:
             return Response({'detail': 'Escribe un motivo antes de rechazar.'}, status=400)
 
-        if turnado.estatusTitular_id != 'Atendido':
+        if turnado.estatusTitular_id != 'Pendiente_validacion':
             return Response(
                 {'detail': 'Esta persona todavía no marca su parte como atendida.'},
                 status=400,
@@ -775,10 +784,18 @@ class SeguimientoListCreateView(APIView):
         if turnado.idDestinatario_id != request.user.id:
             return Response({'detail': 'No autorizado.'}, status=403)
 
-        # Guard: bloquear si el asunto ya está concluido
+        # Guard: bloquear si el asunto ya está concluido, o si ya se marcó
+        # "Atendido" y está esperando la validación del Particular (Rechazar
+        # reabre a 'En_seguimiento' — solo entonces se puede volver a
+        # responder; ver RechazarPersonaTurnadoView).
         if turnado.estatusTitular_id == 'Concluido':
             return Response(
                 {'detail': 'No se pueden agregar respuestas a un asunto ya concluido.'},
+                status=400,
+            )
+        if turnado.estatusTitular_id == 'Pendiente_validacion':
+            return Response(
+                {'detail': 'Ya marcaste tu parte como atendida: espera la validación del Particular antes de agregar más respuestas.'},
                 status=400,
             )
 
@@ -821,14 +838,17 @@ class SeguimientoListCreateView(APIView):
                     if est_ant_turnado == 'Recibido' else
                     f"{nombre_titular} volvió a responder el FUS {fus.folio} tras ser rechazado."
                 )
-                _notif = Notificacion.objects.create(
-                    idDestinatario=fus.idSolicitanteInterno,
-                    fusFolio=fus.folio,
-                    tipoEvento='CAMBIO_ESTADO',
-                    mensaje=mensaje,
-                )
-                push_notificacion(_notif)
-                notificar_por_correo(_notif)
+                destinatarios = {fus.idSolicitanteInterno} | set(_equipo_particular_de(fus.idSolicitanteInterno))
+                destinatarios.discard(user)
+                for destinatario in destinatarios:
+                    _notif = Notificacion.objects.create(
+                        idDestinatario=destinatario,
+                        fusFolio=fus.folio,
+                        tipoEvento='CAMBIO_ESTADO',
+                        mensaje=mensaje,
+                    )
+                    push_notificacion(_notif)
+                    notificar_por_correo(_notif)
 
                 accion = 'REAPERTURA_FUS' if est_ant_turnado == 'Rechazado' else 'ASIGNACION_ESTADO'
                 _log(usuario=user.email, rol=rol, accion=accion,
@@ -845,14 +865,17 @@ class SeguimientoListCreateView(APIView):
             if len(texto_resumen) > 80:
                 resumen += '…'
             etiqueta = 'una nueva respuesta' if seg.descripcionActividad else 'una nueva acción'
-            _notif = Notificacion.objects.create(
-                idDestinatario=fus.idSolicitanteInterno,
-                fusFolio=fus.folio,
-                tipoEvento='RESPUESTA',
-                mensaje=f"{nombre_titular} registró {etiqueta} en el FUS {fus.folio}: \"{resumen}\"",
-            )
-            push_notificacion(_notif)
-            notificar_por_correo(_notif)
+            destinatarios = {fus.idSolicitanteInterno} | set(_equipo_particular_de(fus.idSolicitanteInterno))
+            destinatarios.discard(user)
+            for destinatario in destinatarios:
+                _notif = Notificacion.objects.create(
+                    idDestinatario=destinatario,
+                    fusFolio=fus.folio,
+                    tipoEvento='RESPUESTA',
+                    mensaje=f"{nombre_titular} registró {etiqueta} en el FUS {fus.folio}: \"{resumen}\"",
+                )
+                push_notificacion(_notif)
+                notificar_por_correo(_notif)
 
         _log(usuario=user.email, rol=rol, accion='REGISTRO_RESPUESTA',
              ip=ip, folio=fus.folio)

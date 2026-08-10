@@ -35,6 +35,8 @@ SECCIONES = {
     'unidades': 'FUS por unidad administrativa',
     'productividad': 'Análisis de productividad',
     'tiempos': 'Distribución de tiempos de respuesta',
+    'canal_recepcion': 'Canal de recepción',
+    'antiguedad': 'Antigüedad de solicitudes',
     'detalle': 'Detalle de solicitudes',
 }
 
@@ -159,6 +161,8 @@ def _construir_reporte(qs, inicio, fin):
     responsables = defaultdict(lambda: {'asignados': 0, 'pendientes': 0, 'vencidos': 0, 'concluidos': 0})
     unidades = Counter()
     tiempos = Counter({'hasta_1': 0, '1_3': 0, '3_7': 0, 'mas_7': 0})
+    canales = Counter()
+    antiguedad = Counter({'0_1': 0, '2_3': 0, '4_5': 0, 'mas_5': 0})
     mapa_unidades = _unidad_por_correo()
     total_dias = 0
     concluidos_con_tiempo = 0
@@ -174,6 +178,21 @@ def _construir_reporte(qs, inicio, fin):
         vencido = bool(fus.fechaLimite and fus.fechaLimite < ahora and estado != 'Concluido')
         if vencido:
             meses[clave_mes]['vencidos'] += 1
+
+        canales[fus.idMedioRecepcion.nombreMedio if fus.idMedioRecepcion_id else 'Otro'] += 1
+
+        # Antigüedad: solo lo que sigue abierto (un FUS ya concluido no tiene
+        # "días abierto" que reportar) — mismos umbrales que el dashboard.
+        if estado != 'Concluido' and fus.fechaRegistro:
+            dias_abierto = (ahora - fus.fechaRegistro).total_seconds() / 86400
+            if dias_abierto <= 1:
+                antiguedad['0_1'] += 1
+            elif dias_abierto <= 3:
+                antiguedad['2_3'] += 1
+            elif dias_abierto <= 5:
+                antiguedad['4_5'] += 1
+            else:
+                antiguedad['mas_5'] += 1
         if fus.fechaConclusion:
             meses[timezone.localtime(fus.fechaConclusion).strftime('%Y-%m')]['concluidos'] += 1
             if fus.fechaRegistro:
@@ -262,6 +281,13 @@ def _construir_reporte(qs, inicio, fin):
             {'rango': '1 - 3 días', 'cantidad': tiempos['1_3']},
             {'rango': '3 - 7 días', 'cantidad': tiempos['3_7']},
             {'rango': '> 7 días', 'cantidad': tiempos['mas_7']},
+        ],
+        'canal_recepcion': [{'nombre': k, 'cantidad': v, 'porcentaje': round(v * 100 / total, 1) if total else 0} for k, v in canales.most_common()],
+        'antiguedad': [
+            {'rango': '0-1 días', 'cantidad': antiguedad['0_1']},
+            {'rango': '2-3 días', 'cantidad': antiguedad['2_3']},
+            {'rango': '4-5 días', 'cantidad': antiguedad['4_5']},
+            {'rango': 'Más de 5 días', 'cantidad': antiguedad['mas_5']},
         ],
         'detalle': detalle,
     }
@@ -485,6 +511,28 @@ def _excel_agregar_grafica(ws, clave, n_filas):
         chart.set_categories(Reference(ws, min_col=1, min_row=2, max_row=ultima_fila))
         chart.series[0].graphicalProperties.solidFill = PALETA_HEX[1]
         ws.add_chart(chart, ancla)
+    elif clave == 'canal_recepcion':
+        from openpyxl.chart.marker import DataPoint
+        from openpyxl.chart.shapes import GraphicalProperties
+        chart = PieChart()
+        chart.title = 'Canal de recepción'
+        chart.height, chart.width = 9, 14
+        chart.add_data(Reference(ws, min_col=2, min_row=1, max_row=ultima_fila), titles_from_data=True)
+        chart.set_categories(Reference(ws, min_col=1, min_row=2, max_row=ultima_fila))
+        chart.series[0].data_points = [
+            DataPoint(idx=i, spPr=GraphicalProperties(solidFill=PALETA_HEX[i % len(PALETA_HEX)]))
+            for i in range(n_filas)
+        ]
+        ws.add_chart(chart, ancla)
+    elif clave == 'antiguedad':
+        chart = BarChart()
+        chart.title = 'Antigüedad de solicitudes'
+        chart.style = 10
+        chart.height, chart.width = 9, 14
+        chart.add_data(Reference(ws, min_col=2, min_row=1, max_row=ultima_fila), titles_from_data=True)
+        chart.set_categories(Reference(ws, min_col=1, min_row=2, max_row=ultima_fila))
+        chart.series[0].graphicalProperties.solidFill = PALETA_HEX[2]
+        ws.add_chart(chart, ancla)
 
 
 # Columnas cuyo valor numérico ya está expresado como "42.9" queriendo decir
@@ -563,6 +611,8 @@ class ReporteExportarExcelView(APIView):
             'carga': ('Carga responsables', datos['carga']),
             'unidades': ('Unidades', datos['unidades']),
             'tiempos': ('Tiempos', datos['tiempos']),
+            'canal_recepcion': ('Canal de recepción', datos['canal_recepcion']),
+            'antiguedad': ('Antigüedad', datos['antiguedad']),
             'detalle': ('Detalle FUS', datos['detalle']),
         }
         for clave, (titulo, filas) in tablas.items():
@@ -725,7 +775,7 @@ def _pdf_grafica(seccion, filas):
         d.add(leyenda)
         return d
 
-    if seccion == 'estados':
+    if seccion in ('estados', 'canal_recepcion'):
         if sum(f['cantidad'] for f in filas) == 0:
             return None
         d = Drawing(450, 185)
@@ -741,7 +791,7 @@ def _pdf_grafica(seccion, filas):
         d.add(pie)
         return d
 
-    if seccion in ('unidades', 'tiempos'):
+    if seccion in ('unidades', 'tiempos', 'antiguedad'):
         clave_label = 'unidad' if seccion == 'unidades' else 'rango'
         d = Drawing(450, 185)
         chart = VerticalBarChart()
@@ -847,7 +897,8 @@ class ReporteExportarPDFView(APIView):
             'resumen': datos['resumen'], 'evolucion': datos['evolucion'],
             'estados': datos['estados'], 'carga': datos['carga'],
             'unidades': datos['unidades'], 'productividad': datos['productividad'],
-            'tiempos': datos['tiempos'], 'detalle': datos['detalle'][:150],
+            'tiempos': datos['tiempos'], 'canal_recepcion': datos['canal_recepcion'],
+            'antiguedad': datos['antiguedad'], 'detalle': datos['detalle'][:150],
         }
         for seccion in seleccion:
             filas = contenido[seccion]
@@ -917,14 +968,14 @@ def _pptx_agregar_grafica(slide, seccion, filas):
         slide.shapes.add_chart(XL_CHART_TYPE.LINE_MARKERS, Inches(1.2), Inches(1.5), Inches(11), Inches(5.3), datos_grafica)
         return True
 
-    if seccion == 'estados':
+    if seccion in ('estados', 'canal_recepcion'):
         datos_grafica = CategoryChartData()
         datos_grafica.categories = [f['nombre'] for f in filas]
         datos_grafica.add_series('FUS', [f['cantidad'] for f in filas])
         slide.shapes.add_chart(XL_CHART_TYPE.PIE, Inches(3.2), Inches(1.5), Inches(6.6), Inches(5.3), datos_grafica)
         return True
 
-    if seccion in ('unidades', 'tiempos'):
+    if seccion in ('unidades', 'tiempos', 'antiguedad'):
         clave_label = 'unidad' if seccion == 'unidades' else 'rango'
         datos_grafica = CategoryChartData()
         datos_grafica.categories = [f[clave_label] for f in filas]
@@ -1083,7 +1134,8 @@ class ReporteExportarPPTXView(APIView):
             'resumen': datos['resumen'], 'evolucion': datos['evolucion'],
             'estados': datos['estados'], 'carga': datos['carga'],
             'unidades': datos['unidades'], 'productividad': datos['productividad'],
-            'tiempos': datos['tiempos'], 'detalle': datos['detalle'][:25],
+            'tiempos': datos['tiempos'], 'canal_recepcion': datos['canal_recepcion'],
+            'antiguedad': datos['antiguedad'], 'detalle': datos['detalle'][:25],
         }
         layout_en_blanco = prs.slide_layouts[6] if len(prs.slide_layouts) > 6 else prs.slide_layouts[5]
         for seccion in seleccion:

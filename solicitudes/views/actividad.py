@@ -5,9 +5,10 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
-from ..models import Actividad, Notificacion
+from ..models import Actividad, FUS, Notificacion
 from ..serializers import ActividadSerializer
 from ..services import notificar_por_correo, push_notificacion
+from .helpers import _puede_ver_fus
 
 
 class ActividadListCreateView(APIView):
@@ -31,6 +32,16 @@ class ActividadListCreateView(APIView):
 
     def post(self, request):
         data = request.data
+        fus_id = data.get('idFusRelacionado') or None
+        if fus_id:
+            # Sin esto, cualquier usuario autenticado podía vincular una
+            # actividad a un FUS ajeno con solo mandar su id, y luego leer
+            # `fusFolio` en la respuesta de su propio GET — un oráculo para
+            # enumerar folios de FUS a los que no tiene acceso.
+            fus = get_object_or_404(FUS, pk=fus_id, activo=1)
+            if not _puede_ver_fus(request.user, fus):
+                return Response({'detail': 'No autorizado.'}, status=403)
+
         forzar = data.get('forzarConflicto', False)
         if not forzar:
             conflicto = Actividad.objects.filter(
@@ -43,7 +54,7 @@ class ActividadListCreateView(APIView):
             titulo=data['titulo'], fecha=data['fecha'], horaInicio=data['horaInicio'], horaFin=data['horaFin'],
             descripcion=data.get('descripcion', ''), tipo=data.get('tipo', 'reunion'),
             idCreador=request.user,
-            idFusRelacionado_id=data.get('idFusRelacionado') or None,
+            idFusRelacionado_id=fus_id,
         )
         participantes_ids = data.get('participantes', [])
         if participantes_ids:

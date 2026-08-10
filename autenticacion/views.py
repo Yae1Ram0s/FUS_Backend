@@ -71,10 +71,12 @@ class VerificarCorreoView(APIView):
         try:
             autorizado = CorreoAutorizado.objects.get(email=email, activo=1)
         except CorreoAutorizado.DoesNotExist:
-            return Response(
-                {'detail': 'Correo no autorizado. Contacta al administrador.'},
-                status=status.HTTP_401_UNAUTHORIZED,
-            )
+            # No revelar que el correo no está en la whitelist: responder
+            # igual que el flujo "nuevo" (mismo status, mismo shape) pero sin
+            # generar ni enviar OTP, así un atacante no puede usar este
+            # endpoint para descubrir qué direcciones son cuentas
+            # corporativas válidas probando una lista de correos.
+            return Response({'estado': 'nuevo'})
 
         django_user = User.objects.filter(email=email).first()
         if django_user and django_user.has_usable_password():
@@ -192,7 +194,9 @@ class ReenviarOTPView(APIView):
         try:
             autorizado = CorreoAutorizado.objects.get(email=email, activo=1)
         except CorreoAutorizado.DoesNotExist:
-            return Response({'detail': 'Correo no autorizado.'}, status=status.HTTP_401_UNAUTHORIZED)
+            # Igual criterio que VerificarCorreoView/RecuperarContrasenaView:
+            # no revelar si el correo está en la whitelist.
+            return Response({'enviado': True})
 
         if User.objects.filter(email=email).exists():
             return Response({'detail': 'Este usuario ya tiene cuenta activa.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -222,7 +226,11 @@ class LoginView(APIView):
         try:
             autorizado = CorreoAutorizado.objects.select_related('unidadAdministrativa').get(email=email, activo=1)
         except CorreoAutorizado.DoesNotExist:
-            return Response({'detail': 'Correo no autorizado.'}, status=status.HTTP_401_UNAUTHORIZED)
+            # Mismo mensaje/status que "contraseña incorrecta" más abajo: no
+            # revelar que el correo no está en la whitelist evita usar este
+            # endpoint como oráculo para descubrir cuentas corporativas
+            # válidas probando direcciones al azar.
+            return Response({'detail': 'Correo o contraseña incorrectos.'}, status=status.HTTP_401_UNAUTHORIZED)
 
         try:
             django_user = User.objects.get(email=email)
@@ -242,7 +250,7 @@ class LoginView(APIView):
 
         user = authenticate(request, username=django_user.username, password=password)
         if not user:
-            return Response({'detail': 'Contraseña incorrecta.'}, status=status.HTTP_401_UNAUTHORIZED)
+            return Response({'detail': 'Correo o contraseña incorrectos.'}, status=status.HTTP_401_UNAUTHORIZED)
 
         refresh = RefreshToken.for_user(user)
         _log(usuario=email, rol=autorizado.rol, accion='INICIO_SESION', ip=ip)
@@ -269,6 +277,19 @@ class LogoutView(APIView):
         autorizado = CorreoAutorizado.objects.filter(email=email, activo=1).first()
         rol        = autorizado.rol if autorizado else ''
         _log(usuario=email, rol=rol, accion='CIERRE_SESION', ip=ip)
+
+        # Sin esto, borrar la cookie solo evita que ESTE navegador siga
+        # mandando el refresh token — el JWT en sí sigue siendo válido hasta
+        # su expiración (hasta 1 día) y cualquiera que lo tenga (otra
+        # pestaña, un proxy/log intermedio) puede seguir canjeándolo por
+        # access tokens nuevos aunque el usuario ya "cerró sesión".
+        raw_token = request.COOKIES.get('refresh_token')
+        if raw_token:
+            try:
+                RefreshToken(raw_token).blacklist()
+            except TokenError:
+                pass
+
         response = Response({'detail': 'Sesión cerrada.'})
         response.delete_cookie('refresh_token')
         return response
@@ -490,14 +511,19 @@ class CorreoAutorizadoDetailView(APIView):
             if nuevo_email != c.email:
                 if CorreoAutorizado.objects.filter(email=nuevo_email).exclude(pk=pk).exists():
                     return Response({'detail': 'Ese correo ya está registrado.'}, status=400)
-                # Actualizar Django User si ya tiene cuenta
-                try:
-                    django_user = User.objects.get(email=c.email)
-                    django_user.email    = nuevo_email
-                    django_user.username = nuevo_email
-                    django_user.save()
-                except User.DoesNotExist:
-                    pass
+                # El correo es el identificador de login y de recuperación de
+                # contraseña: si la cuenta ya está activada (tiene password),
+                # reasignarlo aquí permitiría a un ROL1 apuntarlo a un correo
+                # que él controla y luego usar "recuperar contraseña" para
+                # secuestrar la cuenta de otra persona. Para cuentas todavía
+                # no activadas (nunca completaron el registro) sí se permite
+                # corregir el correo, porque nadie ha iniciado sesión con él.
+                django_user = User.objects.filter(email=c.email).first()
+                if django_user and django_user.has_usable_password():
+                    return Response(
+                        {'detail': 'No se puede reasignar el correo de una cuenta ya activada.'},
+                        status=400,
+                    )
                 c.email = nuevo_email
 
         c.idUsuarioModifica = request.user.id

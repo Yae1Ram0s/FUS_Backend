@@ -40,10 +40,13 @@ from .views import (
     ReporteExportarPPTXView,
     ReporteGuardadoListView,
     ReporteGuardadoDescargarView,
+    ReporteTitularExportarExcelView,
+    ReporteTitularOpcionesView,
+    ReporteTitularResumenView,
 )
 
 urlpatterns = [
-    # Reportes e inteligencia operativa
+    # Reportes e inteligencia operativa (ROL1 / Equipo del Particular)
     path('reportes/resumen/',                      ReporteResumenView.as_view(),          name='reportes-resumen'),
     path('reportes/opciones/',                     ReporteOpcionesView.as_view(),         name='reportes-opciones'),
     path('reportes/exportar/excel/',               ReporteExportarExcelView.as_view(),    name='reportes-excel'),
@@ -51,6 +54,11 @@ urlpatterns = [
     path('reportes/exportar/pptx/',                ReporteExportarPPTXView.as_view(),     name='reportes-pptx'),
     path('reportes/guardados/',                    ReporteGuardadoListView.as_view(),     name='reportes-guardados'),
     path('reportes/guardados/<int:pk>/descargar/', ReporteGuardadoDescargarView.as_view(), name='reportes-guardado-descargar'),
+
+    # Reportes — Titular (ROL2), sobre sus propios turnados
+    path('reportes/titular/resumen/',        ReporteTitularResumenView.as_view(),        name='reportes-titular-resumen'),
+    path('reportes/titular/opciones/',       ReporteTitularOpcionesView.as_view(),       name='reportes-titular-opciones'),
+    path('reportes/titular/exportar/excel/', ReporteTitularExportarExcelView.as_view(),  name='reportes-titular-excel'),
 
     # FUS
     path('fus/',                               FUSListCreateView.as_view(),      name='fus-list-create'),

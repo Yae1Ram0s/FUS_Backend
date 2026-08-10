@@ -107,6 +107,11 @@ def notificar_por_correo(notificacion):
                 fus,
                 incluir_imagenes=False,
                 rol_visor='ROL2' if rol == 'ROL2' else 'ROL1',
+                # Igual que en la descarga manual: si el FUS se turnó a más
+                # de un Titular, el PDF adjunto al correo de cada uno debe
+                # acotarse a sus propios turnados/respuestas, nunca a los
+                # de otro destinatario.
+                solo_destinatario_id=destinatario.id if rol == 'ROL2' else None,
             )
             nombre_pdf = f'FUS_{fus.folio.replace("/", "-")}.pdf'
             email.attach(nombre_pdf, pdf_bytes, 'application/pdf')

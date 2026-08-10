@@ -36,6 +36,11 @@ from .reportes import (
     ReporteOpcionesView,
     ReporteResumenView,
 )
+from .reportes_titular import (
+    ReporteTitularExportarExcelView,
+    ReporteTitularOpcionesView,
+    ReporteTitularResumenView,
+)
 from .turnado import (
     ConcluirPersonaTurnadoView,
     ConcluirTurnadoView,
@@ -84,6 +89,9 @@ __all__ = [
     'ReporteGuardadoListView',
     'ReporteOpcionesView',
     'ReporteResumenView',
+    'ReporteTitularExportarExcelView',
+    'ReporteTitularOpcionesView',
+    'ReporteTitularResumenView',
     'RechazarPersonaTurnadoView',
     'RechazarSolicitudView',
     'SeguimientoComisionadoListCreateView',

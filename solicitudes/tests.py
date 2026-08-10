@@ -303,7 +303,7 @@ class ValidacionPorPersonaTurnadoTests(APITestCase):
 
     @classmethod
     def setUpTestData(cls):
-        for clave in ('Turnado', 'En_seguimiento', 'Atendido', 'Concluido', 'Rechazado'):
+        for clave in ('Turnado', 'En_seguimiento', 'Atendido', 'Pendiente_validacion', 'Concluido', 'Rechazado'):
             Estatus.objects.get_or_create(
                 clave=clave, defaults={'nombre': clave, 'tipoFlujo': 'PARTICULAR', 'orden': 1},
             )
@@ -361,7 +361,7 @@ class ValidacionPorPersonaTurnadoTests(APITestCase):
         self.t_mariana.refresh_from_db()
         self.t_lucia.refresh_from_db()
         self.fus.refresh_from_db()
-        self.assertEqual(self.t_mariana.estatusTitular_id, 'Atendido')
+        self.assertEqual(self.t_mariana.estatusTitular_id, 'Pendiente_validacion')
         self.assertEqual(self.t_lucia.estatusTitular_id, 'Recibido')  # sin tocar
         self.assertEqual(self.fus.estatusParticular_id, 'Atendido')
 

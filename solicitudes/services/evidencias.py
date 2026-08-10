@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import uuid
+import zipfile
 
 from django.conf import settings
 from django.db.models import Sum
@@ -20,6 +21,37 @@ ALLOWED_EXTENSIONS = {'.pdf', '.jpg', '.jpeg', '.png', '.docx'}
 MAX_FILE_SIZE = 10 * 1024 * 1024
 MAX_TOTAL_SIZE = 30 * 1024 * 1024
 
+# Firmas de los primeros bytes por extensión — el nombre de archivo y el
+# Content-Type de un multipart request los fija por completo quien sube el
+# archivo, así que por sí solos no prueban nada sobre el contenido real.
+_FIRMAS = {
+    '.pdf':  (b'%PDF-',),
+    '.jpg':  (b'\xff\xd8\xff',),
+    '.jpeg': (b'\xff\xd8\xff',),
+    '.png':  (b'\x89PNG\r\n\x1a\n',),
+}
+
+
+def _contenido_coincide_extension(archivo, extension):
+    archivo.seek(0)
+    try:
+        if extension == '.docx':
+            # Un .docx es un ZIP con esta entrada obligatoria en la raíz;
+            # basta para descartar que sea otra cosa disfrazada con esta
+            # extensión (ejecutable, HTML, etc.) sin parsear el OOXML completo.
+            try:
+                with zipfile.ZipFile(archivo) as zf:
+                    return '[Content_Types].xml' in zf.namelist()
+            except zipfile.BadZipFile:
+                return False
+        firmas = _FIRMAS.get(extension)
+        if not firmas:
+            return True
+        cabecera = archivo.read(max(len(f) for f in firmas))
+        return any(cabecera.startswith(firma) for firma in firmas)
+    finally:
+        archivo.seek(0)
+
 
 def _validar_archivo(archivo):
     extension = os.path.splitext(archivo.name)[1].lower()
@@ -30,6 +62,8 @@ def _validar_archivo(archivo):
         return f'Tipo de archivo no permitido: {mime}.'
     if archivo.size > MAX_FILE_SIZE:
         return f'"{archivo.name}" supera 10 MB.'
+    if not _contenido_coincide_extension(archivo, extension):
+        return f'"{archivo.name}" no es un archivo {extension} válido: su contenido no coincide con la extensión.'
     return None
 
 
