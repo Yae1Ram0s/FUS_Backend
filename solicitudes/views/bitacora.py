@@ -10,8 +10,9 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
 from autenticacion.models import CorreoAutorizado
-from ..models import FUS, Bitacora
+from ..models import FUS, Bitacora, Turnado
 from ..helpers import _resolver_unidad_administrativa
+from ..services.bitacora import condicion_estatus_rol2, estados_visibles_bitacora
 from .helpers import _rol, ROL2_ACCIONES, COMISIONADO_ACCIONES, _metadata_generacion, _propietario_fus
 
 
@@ -26,6 +27,11 @@ ESTATUS_LABELS = {
     'En_seguimiento':       'En seguimiento',
     'Pendiente_validacion': 'Pendiente de validación',
 }
+
+
+def _estado_visible(registro, rol, posicion):
+    estado = estados_visibles_bitacora(registro, rol)[posicion]
+    return ESTATUS_LABELS.get(estado, estado)
 
 
 def _parse_columnas_bitacora(request):
@@ -51,8 +57,15 @@ def _bitacora_base_qs(request):
     if rol == 'ROL1':
         qs = Bitacora.objects.all()
     elif rol == 'ROL2':
+        folios_propios = Turnado.objects.filter(
+            idDestinatario=request.user,
+            activo=1,
+        ).values_list('idFus__folio', flat=True)
         qs = Bitacora.objects.filter(
-            usuario=request.user.email, accion__in=ROL2_ACCIONES
+            fusFolio__in=folios_propios,
+            usuario__iexact=request.user.email,
+            rol='ROL2',
+            accion__in=ROL2_ACCIONES,
         )
     elif rol == 'COMISIONADO':
         qs = Bitacora.objects.filter(
@@ -70,10 +83,12 @@ def _bitacora_base_qs(request):
     # registro sin estadoAnterior NI estadoNuevo (ej. REGISTRO_RESPUESTA de
     # una respuesta que no dispara transición) no tiene nada que mostrar en
     # esa columna, así que se excluye en vez de dejarlo con "—".
-    return (
-        qs.exclude(fusFolio__isnull=True).exclude(fusFolio='')
-          .exclude(estadoAnterior__isnull=True, estadoNuevo__isnull=True)
-    )
+    qs = qs.exclude(fusFolio__isnull=True).exclude(fusFolio='')
+    if rol == 'ROL2':
+        # Las respuestas del titular son información propia aunque no todas
+        # provoquen una transición del FUS; deben permanecer en su Bitácora.
+        return qs
+    return qs.exclude(estadoAnterior__isnull=True, estadoNuevo__isnull=True)
 
 
 def _parse_fecha_local(fecha_str, fin_de_dia=False):
@@ -89,7 +104,7 @@ def _parse_fecha_local(fecha_str, fin_de_dia=False):
     return timezone.make_aware(naive, timezone.get_current_timezone())
 
 
-def _aplicar_filtros_bitacora(qs, params, rol):
+def _aplicar_filtros_bitacora(qs, params, rol, user=None):
     folio         = params.get('folio')
     estatus_lista = params.getlist('estatus_fus')
     unidad_ids   = params.getlist('unidadAdministrativa')
@@ -99,7 +114,7 @@ def _aplicar_filtros_bitacora(qs, params, rol):
 
     q = params.get('q')
     if q:
-        if rol == 'ROL1':
+        if rol in ('ROL1', 'EQUIPO_PARTICULAR'):
             emails_nombre = CorreoAutorizado.objects.filter(nombre__icontains=q).values_list('email', flat=True)
             qs = qs.filter(Q(fusFolio__icontains=q) | Q(usuario__icontains=q) | Q(usuario__in=list(emails_nombre)))
         else:
@@ -110,9 +125,10 @@ def _aplicar_filtros_bitacora(qs, params, rol):
     # Filtro explícito por responsable — separado de `q` (que ya lo cubre de
     # forma difusa): permite elegir uno o varios responsables puntuales desde
     # un buscador con autocompletar, en vez de escribir su correo/nombre a
-    # mano. Solo ROL1 ve quién hizo cada acción (mismo criterio que las
-    # columnas Responsable/Correo — ver esADM en Bitacora.jsx).
-    if usuarios and rol == 'ROL1':
+    # mano. ROL1 y su equipo ven quién hizo cada acción (mismo criterio que
+    # las columnas Responsable/Correo); el
+    # queryset base ya limita a EQUIPO_PARTICULAR a los FUS de su titular.
+    if usuarios and rol in ('ROL1', 'EQUIPO_PARTICULAR'):
         qs = qs.filter(usuario__in=usuarios)
 
     if unidad_ids:
@@ -139,15 +155,32 @@ def _aplicar_filtros_bitacora(qs, params, rol):
         condiciones = Q()
         for estatus_fus in estatus_lista:
             if estatus_fus == 'Vencido':
-                folios = FUS.objects.filter(estatusParticular_id='Turnado', fechaLimite__lt=ahora).values_list('folio', flat=True)
+                if rol == 'ROL2':
+                    folios = Turnado.objects.filter(
+                        idDestinatario=user,
+                        activo=1,
+                        idFus__fechaLimite__lt=ahora,
+                    ).exclude(estatusTitular_id='Concluido').values_list('idFus__folio', flat=True)
+                else:
+                    folios = FUS.objects.filter(estatusParticular_id='Turnado', fechaLimite__lt=ahora).values_list('folio', flat=True)
                 condiciones |= Q(fusFolio__in=list(folios))
             elif estatus_fus == 'PorVencer':
-                folios = FUS.objects.filter(
-                    estatusParticular_id='Turnado',
-                    fechaLimite__gte=ahora,
-                    fechaLimite__lte=ahora + datetime.timedelta(hours=24),
-                ).values_list('folio', flat=True)
+                if rol == 'ROL2':
+                    folios = Turnado.objects.filter(
+                        idDestinatario=user,
+                        activo=1,
+                        idFus__fechaLimite__gte=ahora,
+                        idFus__fechaLimite__lte=ahora + datetime.timedelta(hours=24),
+                    ).exclude(estatusTitular_id='Concluido').values_list('idFus__folio', flat=True)
+                else:
+                    folios = FUS.objects.filter(
+                        estatusParticular_id='Turnado',
+                        fechaLimite__gte=ahora,
+                        fechaLimite__lte=ahora + datetime.timedelta(hours=24),
+                    ).values_list('folio', flat=True)
                 condiciones |= Q(fusFolio__in=list(folios))
+            elif rol == 'ROL2':
+                condiciones |= condicion_estatus_rol2(estatus_fus)
             else:
                 sin_estado_nuevo = Q(estadoNuevo__isnull=True) | Q(estadoNuevo='')
                 condiciones |= (Q(estadoNuevo=estatus_fus) | (sin_estado_nuevo & Q(estadoAnterior=estatus_fus)))
@@ -194,7 +227,7 @@ class BitacoraListView(APIView):
     def get(self, request):
         rol = _rol(request.user)
         qs  = _bitacora_base_qs(request)
-        qs  = _aplicar_filtros_bitacora(qs, request.query_params, rol)
+        qs  = _aplicar_filtros_bitacora(qs, request.query_params, rol, request.user)
 
         try:
             page      = max(1, int(request.query_params.get('page', 1)))
@@ -222,12 +255,50 @@ class BitacoraListView(APIView):
             .values_list('email', 'unidadAdministrativa__unidadAdministrativa')
         )
         data = BitacoraSerializer(
-            pagina, many=True, context={'nombres_map': nombres_map, 'unidades_map': unidades_map},
+            pagina, many=True, context={
+                'nombres_map': nombres_map,
+                'unidades_map': unidades_map,
+                'rol_visor': rol,
+            },
         ).data
         return Response({
             'total': total, 'page': page, 'page_size': page_size,
             'results': data, 'rol': rol,
         })
+
+
+class BitacoraResponsablesView(APIView):
+    """Responsables presentes en la bitácora visible para el usuario.
+
+    Evita reutilizar el catálogo administrativo global: un integrante de
+    EQUIPO_PARTICULAR solo recibe personas relacionadas con los FUS de su
+    titular y nunca correos pertenecientes a otras ramas.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        rol = _rol(request.user)
+        if rol not in ('ROL1', 'EQUIPO_PARTICULAR'):
+            return Response({'detail': 'No autorizado.'}, status=403)
+
+        emails_visibles = _bitacora_base_qs(request).values_list('usuario', flat=True).distinct()
+        qs = CorreoAutorizado.objects.filter(
+            email__in=emails_visibles,
+            activo=1,
+        ).select_related('unidadAdministrativa').order_by('nombre', 'email')
+        busqueda = (request.query_params.get('search') or '').strip()
+        if busqueda:
+            qs = qs.filter(Q(email__icontains=busqueda) | Q(nombre__icontains=busqueda))
+
+        return Response([{
+            'email': c.email,
+            'nombre': c.nombre,
+            'unidadAdministrativa': c.unidadAdministrativa_id,
+            'unidadAdministrativaNombre': (
+                c.unidadAdministrativa.unidadAdministrativa
+                if c.unidadAdministrativa_id else None
+            ),
+        } for c in qs[:100]])
 
 
 # ── Exportar Bitácora ────────────────────────────────────────────────────────
@@ -244,7 +315,7 @@ class ExportarBitacoraExcelView(APIView):
 
         rol = _rol(request.user)
         qs  = _bitacora_base_qs(request)
-        qs  = _aplicar_filtros_bitacora(qs, request.query_params, rol)
+        qs  = _aplicar_filtros_bitacora(qs, request.query_params, rol, request.user)
         qs  = _ordenar_bitacora(qs, request.query_params.get('ordering'))
         columnas = _parse_columnas_bitacora(request)
 
@@ -262,9 +333,9 @@ class ExportarBitacoraExcelView(APIView):
             'nombre':               ('Nombre',                lambda r: nombres_map.get(r.usuario, '')),
             'usuario':              ('Usuario',                lambda r: r.usuario),
             'fecha':                ('Fecha y hora',          lambda r: r.fechaHora.strftime('%d/%m/%Y %H:%M:%S') if r.fechaHora else ''),
-            'estatus':              ('Estatus',                lambda r: ESTATUS_LABELS.get(r.estadoNuevo or r.estadoAnterior, r.estadoNuevo or r.estadoAnterior or '')),
-            'estado_ant':           ('Estado anterior',       lambda r: r.estadoAnterior or ''),
-            'estado_nuevo':         ('Estado nuevo',          lambda r: r.estadoNuevo or ''),
+            'estatus':              ('Estatus',                lambda r: _estado_visible(r, rol, 1) or _estado_visible(r, rol, 0) or ''),
+            'estado_ant':           ('Estado anterior',       lambda r: _estado_visible(r, rol, 0) or ''),
+            'estado_nuevo':         ('Estado nuevo',          lambda r: _estado_visible(r, rol, 1) or ''),
             'observaciones':        ('Observaciones',         lambda r: r.observaciones or ''),
             'unidadAdministrativa': ('Unidad administrativa', lambda r: unidades_map.get(r.usuario) or ''),
         }
@@ -370,7 +441,7 @@ class ExportarBitacoraPDFView(APIView):
 
         rol = _rol(request.user)
         qs  = _bitacora_base_qs(request)
-        qs  = _aplicar_filtros_bitacora(qs, request.query_params, rol)
+        qs  = _aplicar_filtros_bitacora(qs, request.query_params, rol, request.user)
         qs  = _ordenar_bitacora(qs, request.query_params.get('ordering'))
         columnas = _parse_columnas_bitacora(request)
 
@@ -392,9 +463,9 @@ class ExportarBitacoraPDFView(APIView):
             'nombre':               ('Nombre',                lambda r: nombres_map.get(r.usuario, '—')),
             'usuario':              ('Usuario',                lambda r: r.usuario),
             'fecha':                ('Fecha y hora',          lambda r: r.fechaHora.strftime('%d/%m/%Y %H:%M') if r.fechaHora else '—'),
-            'estatus':              ('Estatus',                lambda r: ESTATUS_LABELS.get(r.estadoNuevo or r.estadoAnterior, r.estadoNuevo or r.estadoAnterior or '—')),
-            'estado_ant':           ('Estado ant.',           lambda r: r.estadoAnterior or '—'),
-            'estado_nuevo':         ('Estado nuevo',          lambda r: r.estadoNuevo or '—'),
+            'estatus':              ('Estatus',                lambda r: _estado_visible(r, rol, 1) or _estado_visible(r, rol, 0) or '—'),
+            'estado_ant':           ('Estado ant.',           lambda r: _estado_visible(r, rol, 0) or '—'),
+            'estado_nuevo':         ('Estado nuevo',          lambda r: _estado_visible(r, rol, 1) or '—'),
             'observaciones':        ('Observaciones',         lambda r: r.observaciones or '—'),
             'unidadAdministrativa': ('Unidad administrativa', lambda r: unidades_map.get(r.usuario) or '—'),
         }

@@ -17,6 +17,7 @@ from .views import (
     NotificacionMarcarTodasView,
     NotificacionLimpiarView,
     BitacoraListView,
+    BitacoraResponsablesView,
     ExportarFUSExcelView,
     ExportarFUSPDFView,
     ExportarBitacoraExcelView,
@@ -87,6 +88,7 @@ urlpatterns = [
 
     # Bitácora
     path('bitacora/',                          BitacoraListView.as_view(),          name='bitacora'),
+    path('bitacora/responsables/',             BitacoraResponsablesView.as_view(), name='bitacora-responsables'),
     path('bitacora/exportar/excel/',           ExportarBitacoraExcelView.as_view(), name='bitacora-exportar-excel'),
     path('bitacora/exportar/pdf/',             ExportarBitacoraPDFView.as_view(),   name='bitacora-exportar-pdf'),
 

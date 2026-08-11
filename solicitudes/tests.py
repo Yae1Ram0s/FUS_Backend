@@ -7,8 +7,428 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from autenticacion.models import CorreoAutorizado
-from catalogos.models import Estatus, MedioRecepcion
-from .models import FUS, Evidencia, Turnado
+from catalogos.models import Estatus, MedioRecepcion, UnidadAdministrativa
+from .models import FUS, Evidencia, Turnado, Bitacora
+
+
+class BitacoraROL2Tests(APITestCase):
+    @classmethod
+    def setUpTestData(cls):
+        for clave, tipo, orden in (
+            ('Registrado', 'PARTICULAR', 1),
+            ('Recibido', 'TITULAR', 2),
+        ):
+            Estatus.objects.get_or_create(
+                clave=clave,
+                defaults={'nombre': clave, 'tipoFlujo': tipo, 'orden': orden},
+            )
+
+        cls.rol1 = User.objects.create_user(
+            username='dueno-bitacora@anam.gob.mx',
+            email='dueno-bitacora@anam.gob.mx',
+            password='x',
+        )
+        cls.rol2 = User.objects.create_user(
+            username='titular-a@anam.gob.mx', email='titular-a@anam.gob.mx', password='x',
+        )
+        cls.otro_rol2 = User.objects.create_user(
+            username='titular-b@anam.gob.mx', email='titular-b@anam.gob.mx', password='x',
+        )
+        for usuario, rol in ((cls.rol1, 'ROL1'), (cls.rol2, 'ROL2'), (cls.otro_rol2, 'ROL2')):
+            CorreoAutorizado.objects.create(
+                email=usuario.email,
+                nombre=usuario.username,
+                rol=rol,
+                activo=1,
+            )
+
+        cls.fus_propio = FUS.objects.create(
+            folio='FUS/BITACORA/ROL2/001',
+            idSolicitanteInterno=cls.rol1,
+            descripcion='FUS asignado al titular A',
+            contexto='',
+            estatusParticular_id='Registrado',
+        )
+        cls.fus_ajeno = FUS.objects.create(
+            folio='FUS/BITACORA/ROL2/002',
+            idSolicitanteInterno=cls.rol1,
+            descripcion='FUS asignado al titular B',
+            contexto='',
+            estatusParticular_id='Registrado',
+        )
+        Turnado.objects.create(
+            idFus=cls.fus_propio,
+            idRemitente=cls.rol1,
+            idDestinatario=cls.rol2,
+            estatusTitular_id='Recibido',
+        )
+        Turnado.objects.create(
+            idFus=cls.fus_ajeno,
+            idRemitente=cls.rol1,
+            idDestinatario=cls.otro_rol2,
+            estatusTitular_id='Recibido',
+        )
+
+        Bitacora.objects.create(
+            usuario=cls.rol2.email,
+            rol='ROL2',
+            accion='ASIGNACION_ESTADO',
+            fusFolio=cls.fus_propio.folio,
+            estadoAnterior='Turnado',
+            estadoNuevo='Atendido',
+        )
+        Bitacora.objects.create(
+            usuario=cls.rol2.email,
+            rol='ROL2',
+            accion='REGISTRO_RESPUESTA',
+            fusFolio=cls.fus_propio.folio,
+        )
+        Bitacora.objects.create(
+            usuario=cls.rol2.email,
+            rol='ROL2',
+            accion='ASIGNACION_ESTADO',
+            fusFolio=cls.fus_propio.folio,
+            estadoAnterior='En_seguimiento',
+            estadoNuevo='Atendido',
+        )
+        Bitacora.objects.create(
+            usuario=cls.otro_rol2.email,
+            rol='ROL2',
+            accion='REGISTRO_RESPUESTA',
+            fusFolio=cls.fus_ajeno.folio,
+        )
+        Bitacora.objects.create(
+            usuario=cls.rol1.email,
+            rol='ROL1',
+            accion='TURNAR_FUS',
+            fusFolio=cls.fus_propio.folio,
+            estadoAnterior='Registrado',
+            estadoNuevo='Turnado',
+        )
+
+    def setUp(self):
+        self.client.force_authenticate(self.rol2)
+
+    def test_rol2_solo_recibe_sus_movimientos_de_fus_asignados(self):
+        response = self.client.get('/api/bitacora/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['total'], 3)
+        self.assertTrue(all(r['usuario'] == self.rol2.email for r in response.data['results']))
+        self.assertTrue(all(r['fusFolio'] == self.fus_propio.folio for r in response.data['results']))
+
+    def test_rol2_ve_estados_traducidos_a_su_flujo(self):
+        response = self.client.get('/api/bitacora/')
+        transiciones = {(r['estadoAnterior'], r['estadoNuevo']) for r in response.data['results']}
+        self.assertIn(('Recibido', 'En_seguimiento'), transiciones)
+        self.assertIn(('En_seguimiento', 'Pendiente_validacion'), transiciones)
+
+    def test_filtro_rol2_usa_estados_del_titular(self):
+        en_seguimiento = self.client.get('/api/bitacora/?estatus_fus=En_seguimiento')
+        pendiente = self.client.get('/api/bitacora/?estatus_fus=Pendiente_validacion')
+        self.assertEqual(en_seguimiento.data['total'], 2)
+        self.assertEqual(pendiente.data['total'], 1)
+
+    def test_excel_y_pdf_respetan_filtros_y_columnas_seleccionadas(self):
+        import io
+        import openpyxl
+
+        query = '?estatus_fus=Pendiente_validacion&columnas=folio,estatus'
+        excel = self.client.get(f'/api/bitacora/exportar/excel/{query}')
+        self.assertEqual(excel.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            excel['Content-Type'],
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+
+        libro = openpyxl.load_workbook(io.BytesIO(excel.content), read_only=True)
+        hoja = libro.active
+        filas = list(hoja.iter_rows(values_only=True))
+        indice_encabezado = next(
+            i for i, fila in enumerate(filas)
+            if tuple(fila[:2]) == ('Folio', 'Estatus')
+        )
+        datos = [fila[:2] for fila in filas[indice_encabezado + 1:] if fila[0]]
+        self.assertEqual(datos, [(self.fus_propio.folio, 'Pendiente de validación')])
+
+        pdf = self.client.get(f'/api/bitacora/exportar/pdf/{query}')
+        self.assertEqual(pdf.status_code, status.HTTP_200_OK)
+        self.assertEqual(pdf['Content-Type'], 'application/pdf')
+        self.assertTrue(pdf.content.startswith(b'%PDF'))
+
+
+class BitacoraROL1ExportTests(APITestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.unidad = UnidadAdministrativa.objects.create(
+            idUnidadAdministrativa=99001,
+            clave='QA-BITACORA',
+            unidadAdministrativa='Unidad de prueba Bitácora',
+            esUnidadAdministrativa=1,
+            activo=1,
+        )
+        cls.rol1 = User.objects.create_user(
+            username='particular-bitacora@anam.gob.mx',
+            email='particular-bitacora@anam.gob.mx',
+            password='x',
+        )
+        cls.responsable = User.objects.create_user(
+            username='responsable-bitacora@anam.gob.mx',
+            email='responsable-bitacora@anam.gob.mx',
+            password='x',
+        )
+        cls.otro_responsable = User.objects.create_user(
+            username='otro-responsable@anam.gob.mx',
+            email='otro-responsable@anam.gob.mx',
+            password='x',
+        )
+        CorreoAutorizado.objects.create(
+            email=cls.rol1.email, nombre='Particular de prueba', rol='ROL1', activo=1,
+        )
+        CorreoAutorizado.objects.create(
+            email=cls.responsable.email,
+            nombre='Responsable correcto',
+            rol='ROL2',
+            unidadAdministrativa=cls.unidad,
+            activo=1,
+        )
+        CorreoAutorizado.objects.create(
+            email=cls.otro_responsable.email, nombre='Responsable ajeno', rol='ROL2', activo=1,
+        )
+        Bitacora.objects.create(
+            usuario=cls.responsable.email,
+            rol='ROL2',
+            accion='CONCLUSION_FUS',
+            fusFolio='ANAM/PARTICULAR/FUS/ROL1/001',
+            estadoAnterior='Pendiente_validacion',
+            estadoNuevo='Concluido',
+            observaciones='Movimiento que debe exportarse',
+        )
+        Bitacora.objects.create(
+            usuario=cls.otro_responsable.email,
+            rol='ROL2',
+            accion='ASIGNACION_ESTADO',
+            fusFolio='ANAM/PARTICULAR/FUS/ROL1/002',
+            estadoAnterior='Turnado',
+            estadoNuevo='Atendido',
+            observaciones='Movimiento que debe quedar fuera',
+        )
+
+    def setUp(self):
+        self.client.force_authenticate(self.rol1)
+
+    def _query(self, columnas=None):
+        from urllib.parse import urlencode
+        from django.utils import timezone
+
+        params = [
+            ('q', 'FUS/ROL1/001'),
+            ('usuario', self.responsable.email),
+            ('unidadAdministrativa', str(self.unidad.idUnidadAdministrativa)),
+            ('estatus_fus', 'Concluido'),
+            ('fecha_desde', timezone.localdate().isoformat()),
+            ('fecha_hasta', timezone.localdate().isoformat()),
+            ('ordering', 'folio'),
+        ]
+        if columnas:
+            params.append(('columnas', columnas))
+        return f'?{urlencode(params)}'
+
+    def test_lista_rol1_aplica_la_seleccion_combinada(self):
+        response = self.client.get(f'/api/bitacora/{self._query()}')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['total'], 1)
+        self.assertEqual(response.data['results'][0]['usuario'], self.responsable.email)
+        self.assertEqual(response.data['results'][0]['estadoNuevo'], 'Concluido')
+
+    def test_excel_rol1_conserva_filtros_orden_y_columnas(self):
+        import io
+        import openpyxl
+
+        columnas = 'folio,nombre,usuario,estatus,estado_ant,estado_nuevo,observaciones'
+        response = self.client.get(
+            f'/api/bitacora/exportar/excel/{self._query(columnas)}'
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        libro = openpyxl.load_workbook(io.BytesIO(response.content), read_only=True)
+        filas = list(libro.active.iter_rows(values_only=True))
+        encabezado = ('Folio', 'Nombre', 'Usuario', 'Estatus', 'Estado anterior', 'Estado nuevo', 'Observaciones')
+        indice = next(i for i, fila in enumerate(filas) if tuple(fila[:7]) == encabezado)
+        datos = [fila[:7] for fila in filas[indice + 1:] if fila[0]]
+        self.assertEqual(datos, [(
+            'ANAM/PARTICULAR/FUS/ROL1/001',
+            'Responsable correcto',
+            self.responsable.email,
+            'Concluido',
+            'Pendiente de validación',
+            'Concluido',
+            'Movimiento que debe exportarse',
+        )])
+
+    def test_pdf_rol1_conserva_la_misma_seleccion(self):
+        columnas = 'folio,nombre,estatus,observaciones'
+        response = self.client.get(
+            f'/api/bitacora/exportar/pdf/{self._query(columnas)}'
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response['Content-Type'], 'application/pdf')
+        self.assertTrue(response.content.startswith(b'%PDF'))
+
+
+class BitacoraEquipoParticularExportTests(APITestCase):
+    @classmethod
+    def setUpTestData(cls):
+        Estatus.objects.get_or_create(
+            clave='Registrado',
+            defaults={'nombre': 'Registrado', 'tipoFlujo': 'PARTICULAR', 'orden': 1},
+        )
+        cls.unidad = UnidadAdministrativa.objects.create(
+            idUnidadAdministrativa=99002,
+            clave='QA-EQUIPO',
+            unidadAdministrativa='Unidad visible del equipo',
+            esUnidadAdministrativa=1,
+            activo=1,
+        )
+        cls.propietario = User.objects.create_user(
+            username='dueno-equipo-bitacora@anam.gob.mx',
+            email='dueno-equipo-bitacora@anam.gob.mx',
+            password='x',
+        )
+        cls.propietario_ajeno = User.objects.create_user(
+            username='dueno-ajeno-bitacora@anam.gob.mx',
+            email='dueno-ajeno-bitacora@anam.gob.mx',
+            password='x',
+        )
+        cls.equipo = User.objects.create_user(
+            username='equipo-bitacora@anam.gob.mx',
+            email='equipo-bitacora@anam.gob.mx',
+            password='x',
+        )
+        cls.responsable = User.objects.create_user(
+            username='responsable-equipo@anam.gob.mx',
+            email='responsable-equipo@anam.gob.mx',
+            password='x',
+        )
+        cls.responsable_ajeno = User.objects.create_user(
+            username='responsable-ajeno-equipo@anam.gob.mx',
+            email='responsable-ajeno-equipo@anam.gob.mx',
+            password='x',
+        )
+        CorreoAutorizado.objects.create(
+            email=cls.propietario.email, nombre='Titular particular propio', rol='ROL1', activo=1,
+        )
+        CorreoAutorizado.objects.create(
+            email=cls.propietario_ajeno.email, nombre='Titular particular ajeno', rol='ROL1', activo=1,
+        )
+        CorreoAutorizado.objects.create(
+            email=cls.equipo.email,
+            nombre='Equipo del titular propio',
+            rol='EQUIPO_PARTICULAR',
+            activo=1,
+            idUsuarioRegistra=cls.propietario.id,
+        )
+        CorreoAutorizado.objects.create(
+            email=cls.responsable.email,
+            nombre='Responsable visible',
+            rol='ROL2',
+            unidadAdministrativa=cls.unidad,
+            activo=1,
+        )
+        CorreoAutorizado.objects.create(
+            email=cls.responsable_ajeno.email,
+            nombre='Responsable oculto',
+            rol='ROL2',
+            activo=1,
+        )
+        cls.fus_propio = FUS.objects.create(
+            folio='ANAM/PARTICULAR/FUS/EQUIPO/001',
+            idSolicitanteInterno=cls.propietario,
+            descripcion='FUS del titular asociado',
+            contexto='',
+            estatusParticular_id='Registrado',
+        )
+        cls.fus_ajeno = FUS.objects.create(
+            folio='ANAM/PARTICULAR/FUS/EQUIPO/002',
+            idSolicitanteInterno=cls.propietario_ajeno,
+            descripcion='FUS de otra rama',
+            contexto='',
+            estatusParticular_id='Registrado',
+        )
+        Bitacora.objects.create(
+            usuario=cls.responsable.email,
+            rol='ROL2',
+            accion='CONCLUSION_FUS',
+            fusFolio=cls.fus_propio.folio,
+            estadoAnterior='Pendiente_validacion',
+            estadoNuevo='Concluido',
+            observaciones='Movimiento visible para el equipo',
+        )
+        Bitacora.objects.create(
+            usuario=cls.responsable_ajeno.email,
+            rol='ROL2',
+            accion='CONCLUSION_FUS',
+            fusFolio=cls.fus_ajeno.folio,
+            estadoAnterior='Pendiente_validacion',
+            estadoNuevo='Concluido',
+            observaciones='Movimiento de otra rama',
+        )
+
+    def setUp(self):
+        self.client.force_authenticate(self.equipo)
+
+    def _query(self, columnas=None):
+        from urllib.parse import urlencode
+        from django.utils import timezone
+
+        params = [
+            ('q', 'Responsable visible'),
+            ('usuario', self.responsable.email),
+            ('unidadAdministrativa', str(self.unidad.idUnidadAdministrativa)),
+            ('estatus_fus', 'Concluido'),
+            ('fecha_desde', timezone.localdate().isoformat()),
+            ('fecha_hasta', timezone.localdate().isoformat()),
+            ('ordering', 'folio'),
+        ]
+        if columnas:
+            params.append(('columnas', columnas))
+        return f'?{urlencode(params)}'
+
+    def test_equipo_solo_ve_la_rama_de_su_titular_y_aplica_filtros(self):
+        response = self.client.get(f'/api/bitacora/{self._query()}')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['total'], 1)
+        self.assertEqual(response.data['results'][0]['fusFolio'], self.fus_propio.folio)
+
+    def test_opciones_de_responsable_no_exponen_otras_ramas(self):
+        response = self.client.get('/api/bitacora/responsables/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual([item['email'] for item in response.data], [self.responsable.email])
+        self.assertEqual(response.data[0]['unidadAdministrativa'], self.unidad.idUnidadAdministrativa)
+
+    def test_excel_y_pdf_del_equipo_conservan_seleccion(self):
+        import io
+        import openpyxl
+
+        columnas = 'folio,nombre,usuario,unidadAdministrativa,estatus,observaciones'
+        excel = self.client.get(f'/api/bitacora/exportar/excel/{self._query(columnas)}')
+        self.assertEqual(excel.status_code, status.HTTP_200_OK)
+        libro = openpyxl.load_workbook(io.BytesIO(excel.content), read_only=True)
+        filas = list(libro.active.iter_rows(values_only=True))
+        encabezado = ('Folio', 'Nombre', 'Usuario', 'Unidad administrativa', 'Estatus', 'Observaciones')
+        indice = next(i for i, fila in enumerate(filas) if tuple(fila[:6]) == encabezado)
+        datos = [fila[:6] for fila in filas[indice + 1:] if fila[0]]
+        self.assertEqual(datos, [(
+            self.fus_propio.folio,
+            'Responsable visible',
+            self.responsable.email,
+            self.unidad.unidadAdministrativa,
+            'Concluido',
+            'Movimiento visible para el equipo',
+        )])
+
+        pdf = self.client.get(f'/api/bitacora/exportar/pdf/{self._query(columnas)}')
+        self.assertEqual(pdf.status_code, status.HTTP_200_OK)
+        self.assertEqual(pdf['Content-Type'], 'application/pdf')
+        self.assertTrue(pdf.content.startswith(b'%PDF'))
 
 
 class ReportesTests(APITestCase):

@@ -387,7 +387,11 @@ class FUSDetalleAuditoriaView(APIView):
             'folio': fus.folio,
             'descripcion': fus.descripcion,
             'contexto': fus.contexto,
-            'medioRecepcion': fus.idMedioRecepcion.nombreMedio if fus.idMedioRecepcion else None,
+            'medioRecepcion': (
+                f'{fus.idMedioRecepcion.nombreMedio} — {fus.medioEspecificacion}'
+                if fus.idMedioRecepcion and fus.idMedioRecepcion.nombreMedio == 'Otro' and fus.medioEspecificacion
+                else (fus.idMedioRecepcion.nombreMedio if fus.idMedioRecepcion else None)
+            ),
             'prioridad': fus.prioridad,
             'criterios': fus.criterios,
             'nombreExterno': fus.nombreExterno,

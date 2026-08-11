@@ -1,7 +1,9 @@
 import secrets
 import string
+import time
 
 from django.conf import settings
+from django.core.cache import cache
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
@@ -41,6 +43,55 @@ class LoginThrottle(AnonRateThrottle):
 
 class OTPThrottle(AnonRateThrottle):
     scope = 'otp'
+
+
+# Bloqueo por intentos fallidos, por correo (independiente del LoginThrottle
+# de arriba, que limita por IP): tras LOGIN_INTENTOS_MAX fallos seguidos con
+# el mismo correo, ese correo queda bloqueado LOGIN_BLOQUEO_SEGUNDOS antes de
+# poder volver a intentar, sin importar desde qué IP.
+LOGIN_INTENTOS_MAX = 5
+LOGIN_BLOQUEO_SEGUNDOS = 60
+LOGIN_INTENTOS_CACHE_TTL = 15 * 60  # ventana en la que se olvida el conteo si no hay más intentos
+
+
+def _login_cache_key(email):
+    return f'login_intentos:{email}'
+
+
+def _login_bloqueado(email):
+    """Si el correo sigue dentro del minuto de bloqueo, regresa la respuesta
+    429 lista para devolver; si no, None."""
+    estado = cache.get(_login_cache_key(email))
+    restante = (estado or {}).get('bloqueado_hasta', 0) - time.time()
+    if restante <= 0:
+        return None
+    segundos = int(restante) + 1
+    return Response(
+        {
+            'detail': f'Demasiados intentos. Espera {segundos} segundos e intenta de nuevo.',
+            'code': 'login_bloqueado',
+            'segundosRestantes': segundos,
+        },
+        status=status.HTTP_429_TOO_MANY_REQUESTS,
+    )
+
+
+def _login_fallido(email):
+    """Registra un intento fallido — correo inexistente y contraseña
+    incorrecta cuentan igual, para no delatar cuál de los dos fue (mismo
+    criterio anti-enumeración que el resto de este endpoint) — y regresa la
+    respuesta correspondiente: 401 genérico, o 429 si este intento acaba de
+    activar el bloqueo."""
+    key = _login_cache_key(email)
+    estado = cache.get(key) or {'intentos': 0, 'bloqueado_hasta': 0}
+    estado['intentos'] += 1
+    if estado['intentos'] >= LOGIN_INTENTOS_MAX:
+        estado['bloqueado_hasta'] = time.time() + LOGIN_BLOQUEO_SEGUNDOS
+        estado['intentos'] = 0
+    cache.set(key, estado, LOGIN_INTENTOS_CACHE_TTL)
+    if estado['bloqueado_hasta'] > time.time():
+        return _login_bloqueado(email)
+    return Response({'detail': 'Correo o contraseña incorrectos.'}, status=status.HTTP_401_UNAUTHORIZED)
 
 
 def _generar_otp(email, ip):
@@ -223,6 +274,10 @@ class LoginView(APIView):
         password = ser.validated_data['password']
         ip       = request.META.get('REMOTE_ADDR')
 
+        bloqueo = _login_bloqueado(email)
+        if bloqueo:
+            return bloqueo
+
         try:
             autorizado = CorreoAutorizado.objects.select_related('unidadAdministrativa').get(email=email, activo=1)
         except CorreoAutorizado.DoesNotExist:
@@ -230,7 +285,7 @@ class LoginView(APIView):
             # revelar que el correo no está en la whitelist evita usar este
             # endpoint como oráculo para descubrir cuentas corporativas
             # válidas probando direcciones al azar.
-            return Response({'detail': 'Correo o contraseña incorrectos.'}, status=status.HTTP_401_UNAUTHORIZED)
+            return _login_fallido(email)
 
         try:
             django_user = User.objects.get(email=email)
@@ -250,8 +305,9 @@ class LoginView(APIView):
 
         user = authenticate(request, username=django_user.username, password=password)
         if not user:
-            return Response({'detail': 'Correo o contraseña incorrectos.'}, status=status.HTTP_401_UNAUTHORIZED)
+            return _login_fallido(email)
 
+        cache.delete(_login_cache_key(email))
         refresh = RefreshToken.for_user(user)
         _log(usuario=email, rol=autorizado.rol, accion='INICIO_SESION', ip=ip)
 

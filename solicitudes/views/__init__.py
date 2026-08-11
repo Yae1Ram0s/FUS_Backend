@@ -1,6 +1,7 @@
 from .actividad import ActividadDetailView, ActividadListCreateView
 from .bitacora import (
     BitacoraListView,
+    BitacoraResponsablesView,
     ExportarBitacoraExcelView,
     ExportarBitacoraPDFView,
 )
@@ -59,6 +60,7 @@ __all__ = [
     'ActividadListCreateView',
     'AtendidoFUSView',
     'BitacoraListView',
+    'BitacoraResponsablesView',
     'ComisionarFUSView',
     'ConcluirAsuntoView',
     'ConcluirPersonaTurnadoView',

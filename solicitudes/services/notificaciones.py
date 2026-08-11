@@ -1,10 +1,12 @@
 import logging
+import threading
 from urllib.parse import urlencode
 
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
+from django.db import connections, transaction
 from django.utils.html import escape
 
 from ..utils import get_rol
@@ -60,11 +62,47 @@ def push_notificacion(notificacion):
 
 
 def notificar_por_correo(notificacion):
-    """Envía una copia por correo sin interrumpir el flujo si el canal falla."""
-    destinatario = notificacion.idDestinatario
-    if not destinatario or not destinatario.email:
-        return
+    """Dispara el envío en un hilo aparte y regresa de inmediato. El envío
+    puede tardar varios segundos (generación del PDF adjunto + handshake
+    SMTP) y no hay razón para que la vista que disparó la notificación
+    —turnar, comisionar, atender, concluir...— espere eso antes de responder
+    al usuario; antes esto corría en línea y era la causa principal de que
+    turnar un FUS a varios Titulares se sintiera lento.
 
+    Contraparte: un fallo de envío (SMTP caído, PDF que no se pudo generar)
+    solo queda registrado en el log de `_enviar_correo` — sin reintento
+    automático ni forma de verlo desde la UI. Si eso llega a ser un problema
+    real, el siguiente paso es una cola de tareas de verdad (django-rq sobre
+    el mismo Redis que ya usan los Channels), no otro hilo suelto."""
+    # `on_commit` (no arrancar el hilo directo): la mayoría de las vistas que
+    # llaman a esto (turnar, comisionar, atender, concluir) están envueltas
+    # en `@transaction.atomic` con `select_for_update()`. Si el hilo arranca
+    # antes del commit, corre en OTRA conexión que no ve esa transacción
+    # todavía abierta: el `FUS.objects.get(...)` de abajo le sale
+    # `DoesNotExist` (o datos viejos, según el motor) aunque el turnado ya se
+    # haya guardado bien. `on_commit` difiere el arranque del hilo hasta que
+    # la transacción de la vista ya cerró — y si la vista NO está en una
+    # transacción explícita (autocommit), Django lo ejecuta de inmediato, así
+    # que no cambia nada para esos casos.
+    transaction.on_commit(
+        lambda: threading.Thread(target=_enviar_correo, args=(notificacion,), daemon=True).start()
+    )
+
+
+def _enviar_correo(notificacion):
+    try:
+        destinatario = notificacion.idDestinatario
+        if not destinatario or not destinatario.email:
+            return
+        _enviar_correo_a(notificacion, destinatario)
+    finally:
+        # Django solo cierra las conexiones a BD automáticamente al final de
+        # un request/response normal — en un hilo levantado a mano hay que
+        # hacerlo explícito, o cada envío deja una conexión huérfana abierta.
+        connections.close_all()
+
+
+def _enviar_correo_a(notificacion, destinatario):
     asunto_template = TIPO_EVENTO_ASUNTO.get(
         notificacion.tipoEvento,
         'Actualización de FUS — {folio}',

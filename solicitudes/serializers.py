@@ -5,6 +5,7 @@ from .models import FUS, Evidencia, Turnado, Seguimiento, Notificacion, Bitacora
 from .utils import resolver_nombre, get_rol
 from .helpers import _resolver_unidad_administrativa
 from .permissions import _unidad_id
+from .services.bitacora import estados_visibles_bitacora
 
 
 class UserMiniSerializer(serializers.ModelSerializer):
@@ -330,6 +331,8 @@ class TurnadoSerializer(serializers.ModelSerializer):
 class BitacoraSerializer(serializers.ModelSerializer):
     nombre = serializers.SerializerMethodField()
     unidadAdministrativa = serializers.SerializerMethodField()
+    estadoAnterior = serializers.SerializerMethodField()
+    estadoNuevo = serializers.SerializerMethodField()
 
     def get_nombre(self, obj):
         return self.context.get('nombres_map', {}).get(obj.usuario, '')
@@ -338,6 +341,12 @@ class BitacoraSerializer(serializers.ModelSerializer):
         # Requiere 'unidades_map' en el context (ver BitacoraListView.get) —
         # una consulta para toda la página en vez de una por fila.
         return self.context.get('unidades_map', {}).get(obj.usuario) or 'Sin unidad asignada'
+
+    def get_estadoAnterior(self, obj):
+        return estados_visibles_bitacora(obj, self.context.get('rol_visor'))[0]
+
+    def get_estadoNuevo(self, obj):
+        return estados_visibles_bitacora(obj, self.context.get('rol_visor'))[1]
 
     class Meta:
         model  = Bitacora
