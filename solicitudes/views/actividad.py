@@ -42,10 +42,15 @@ class ActividadListCreateView(APIView):
             if not _puede_ver_fus(request.user, fus):
                 return Response({'detail': 'No autorizado.'}, status=403)
 
+        participantes_ids = data.get('participantes', [])
         forzar = data.get('forzarConflicto', False)
         if not forzar:
+            # También cuenta como conflicto si algún invitado ya tiene otra
+            # actividad en ese horario, no solo el creador — antes solo se
+            # comprobaba "¿yo ya tengo algo ahí?".
             conflicto = Actividad.objects.filter(
-                idCreador=request.user, fecha=data['fecha'], activo=1,
+                Q(idCreador=request.user) | Q(participantes__in=participantes_ids),
+                fecha=data['fecha'], activo=1,
                 horaInicio__lt=data['horaFin'], horaFin__gt=data['horaInicio'],
             ).exists()
             if conflicto:
@@ -56,7 +61,6 @@ class ActividadListCreateView(APIView):
             idCreador=request.user,
             idFusRelacionado_id=fus_id,
         )
-        participantes_ids = data.get('participantes', [])
         if participantes_ids:
             actividad.participantes.set(participantes_ids)
             for uid in participantes_ids:
@@ -74,12 +78,49 @@ class ActividadDetailView(APIView):
 
     def patch(self, request, pk):
         actividad = get_object_or_404(Actividad, pk=pk, idCreador=request.user, activo=1)
+        data = request.data
+
+        participantes_nuevos = data.get('participantes')
+        cambia_horario = any(campo in data for campo in ('fecha', 'horaInicio', 'horaFin'))
+        if cambia_horario and not data.get('forzarConflicto', False):
+            # Mismo chequeo que al crear (ver POST): si no se repite aquí, se
+            # puede mover una actividad a un horario ya ocupado —propio o de
+            # un invitado— sin ningún aviso de conflicto.
+            fecha      = data.get('fecha', actividad.fecha)
+            horaInicio = data.get('horaInicio', actividad.horaInicio)
+            horaFin    = data.get('horaFin', actividad.horaFin)
+            participantes_ids = (
+                participantes_nuevos if participantes_nuevos is not None
+                else list(actividad.participantes.values_list('id', flat=True))
+            )
+            conflicto = Actividad.objects.filter(
+                Q(idCreador=request.user) | Q(participantes__in=participantes_ids),
+                fecha=fecha, activo=1,
+                horaInicio__lt=horaFin, horaFin__gt=horaInicio,
+            ).exclude(pk=actividad.pk).exists()
+            if conflicto:
+                return Response({'conflicto': True, 'detail': 'Ya existe otra actividad en ese horario.'}, status=409)
+
         for campo in ['titulo', 'fecha', 'horaInicio', 'horaFin', 'descripcion', 'tipo']:
-            if campo in request.data:
-                setattr(actividad, campo, request.data[campo])
+            if campo in data:
+                setattr(actividad, campo, data[campo])
         actividad.save()
-        if 'participantes' in request.data:
-            actividad.participantes.set(request.data['participantes'])
+
+        if participantes_nuevos is not None:
+            # Antes solo se notificaba a los participantes al CREAR la
+            # actividad: alguien agregado en una edición nunca se enteraba.
+            anteriores = set(actividad.participantes.values_list('id', flat=True))
+            actividad.participantes.set(participantes_nuevos)
+            agregados = {int(uid) for uid in participantes_nuevos} - anteriores
+            for uid in agregados:
+                notif = Notificacion.objects.create(
+                    idDestinatario_id=uid,
+                    fusFolio=actividad.idFusRelacionado.folio if actividad.idFusRelacionado else '',
+                    tipoEvento='ACTIVIDAD', mensaje=f"Fuiste invitado a '{actividad.titulo}' el {actividad.fecha}.",
+                )
+                push_notificacion(notif)
+                notificar_por_correo(notif)
+
         return Response(ActividadSerializer(actividad).data)
 
     def delete(self, request, pk):

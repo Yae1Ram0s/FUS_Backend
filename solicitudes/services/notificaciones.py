@@ -89,37 +89,43 @@ def notificar_por_correo(notificacion):
         )
         email.attach_alternative(html_body, 'text/html')
 
-        try:
-            from ..models import FUS
-            from ..views.fus import generar_pdf_fus
+        # Una notificación sin FUS asociado (p. ej. un aviso de calendario
+        # para una reunión simple, `fusFolio=''`) no tiene PDF que adjuntar.
+        # Sin este corte, cada una de estas disparaba `FUS.objects.get('')`,
+        # fallaba con `DoesNotExist` y se registraba como excepción completa
+        # en el log — puro ruido, sin ningún caso real que cubrir.
+        if notificacion.fusFolio:
+            try:
+                from ..models import FUS
+                from ..views.fus import generar_pdf_fus
 
-            fus = FUS.objects.select_related(
-                'idSolicitanteInterno',
-                'idMedioRecepcion',
-                'estatusParticular',
-            ).prefetch_related(
-                'evidencias',
-                'turnados__idDestinatario',
-                'turnados__idMedio',
-                'turnados__seguimientos',
-            ).get(folio=notificacion.fusFolio, activo=1)
-            pdf_bytes = generar_pdf_fus(
-                fus,
-                incluir_imagenes=False,
-                rol_visor='ROL2' if rol == 'ROL2' else 'ROL1',
-                # Igual que en la descarga manual: si el FUS se turnó a más
-                # de un Titular, el PDF adjunto al correo de cada uno debe
-                # acotarse a sus propios turnados/respuestas, nunca a los
-                # de otro destinatario.
-                solo_destinatario_id=destinatario.id if rol == 'ROL2' else None,
-            )
-            nombre_pdf = f'FUS_{fus.folio.replace("/", "-")}.pdf'
-            email.attach(nombre_pdf, pdf_bytes, 'application/pdf')
-        except Exception:
-            logger.exception(
-                'No se pudo adjuntar el PDF del FUS %s al correo',
-                notificacion.fusFolio,
-            )
+                fus = FUS.objects.select_related(
+                    'idSolicitanteInterno',
+                    'idMedioRecepcion',
+                    'estatusParticular',
+                ).prefetch_related(
+                    'evidencias',
+                    'turnados__idDestinatario',
+                    'turnados__idMedio',
+                    'turnados__seguimientos',
+                ).get(folio=notificacion.fusFolio, activo=1)
+                pdf_bytes = generar_pdf_fus(
+                    fus,
+                    incluir_imagenes=False,
+                    rol_visor='ROL2' if rol == 'ROL2' else 'ROL1',
+                    # Igual que en la descarga manual: si el FUS se turnó a
+                    # más de un Titular, el PDF adjunto al correo de cada uno
+                    # debe acotarse a sus propios turnados/respuestas, nunca
+                    # a los de otro destinatario.
+                    solo_destinatario_id=destinatario.id if rol == 'ROL2' else None,
+                )
+                nombre_pdf = f'FUS_{fus.folio.replace("/", "-")}.pdf'
+                email.attach(nombre_pdf, pdf_bytes, 'application/pdf')
+            except Exception:
+                logger.exception(
+                    'No se pudo adjuntar el PDF del FUS %s al correo',
+                    notificacion.fusFolio,
+                )
 
         email.send(fail_silently=True)
     except Exception:

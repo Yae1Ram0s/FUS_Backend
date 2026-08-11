@@ -434,13 +434,19 @@ class CorreoAutorizadoListView(APIView):
         if rol:      qs = qs.filter(rol=rol)
         if activo in ('0', '1'): qs = qs.filter(activo=int(activo))
 
+        # Una sola consulta para todo el listado en vez de una por fila
+        # (antes: `User.objects.filter(email=c.email).exists()` dentro del
+        # list comprehension, N+1 con N correos autorizados).
+        emails_con_cuenta = set(
+            User.objects.filter(email__in=qs.values_list('email', flat=True)).values_list('email', flat=True)
+        )
         data = [{
             'id':     c.id,
             'email':  c.email,
             'nombre': c.nombre,
             'rol':    c.rol,
             'activo': c.activo,
-            'tiene_cuenta': User.objects.filter(email=c.email).exists(),
+            'tiene_cuenta': c.email in emails_con_cuenta,
             'unidadAdministrativa': c.unidadAdministrativa_id,
             'unidadAdministrativaNombre': c.unidadAdministrativa.unidadAdministrativa if c.unidadAdministrativa_id else None,
         } for c in qs]
@@ -495,8 +501,19 @@ class CorreoAutorizadoDetailView(APIView):
             return Response({'detail': 'No encontrado.'}, status=404)
 
         if 'activo' in request.data:
-            c.activo = int(request.data['activo'])
-        if 'rol' in request.data and request.data['rol'] in ('ROL1', 'ROL2', 'COMISIONADO', 'EQUIPO_PARTICULAR'):
+            try:
+                nuevo_activo = int(request.data['activo'])
+            except (TypeError, ValueError):
+                return Response({'detail': 'Valor de "activo" inválido.'}, status=400)
+            # El frontend ya bloquea auto-desactivarse desde la UI, pero esa
+            # regla no existía en el backend: cualquier llamada directa a la
+            # API podía desactivar la propia cuenta sin ningún control.
+            if nuevo_activo == 0 and c.email == request.user.email:
+                return Response({'detail': 'No puedes desactivar tu propia cuenta.'}, status=400)
+            c.activo = nuevo_activo
+        if 'rol' in request.data:
+            if request.data['rol'] not in ('ROL1', 'ROL2', 'COMISIONADO', 'EQUIPO_PARTICULAR'):
+                return Response({'detail': 'Rol inválido.'}, status=400)
             c.rol = request.data['rol']
         if 'nombre' in request.data:
             c.nombre = request.data['nombre'].strip()
@@ -505,6 +522,16 @@ class CorreoAutorizadoDetailView(APIView):
             if unidad_id and not UnidadAdministrativa.objects.filter(pk=unidad_id, activo=1).exists():
                 return Response({'detail': 'Unidad administrativa inválida.'}, status=400)
             c.unidadAdministrativa_id = unidad_id
+
+        # Mismo requisito que al crear (POST): un comisionado sin dirección
+        # vinculada queda huérfano. Se valida sobre el estado final de `c`
+        # (tras aplicar rol/unidad de este request) para cubrir también el
+        # caso de editar el rol a COMISIONADO sin mandar unidad.
+        if c.rol == 'COMISIONADO' and not c.unidadAdministrativa_id:
+            return Response(
+                {'detail': 'Selecciona la dirección a la que quedará vinculado el comisionado.'},
+                status=400,
+            )
 
         if 'email' in request.data:
             nuevo_email = request.data['email'].strip().lower()

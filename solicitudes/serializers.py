@@ -72,16 +72,22 @@ class FUSSerializer(serializers.ModelSerializer):
     def get_direccionTitular(self, obj):
         # Unidad administrativa del Titular (ROL2) al que se turnó este FUS —
         # no la del Comisionado (ver direccionComisionado, distinto criterio).
-        turnado = obj.turnados.filter(activo=1).first()
-        if not turnado or not turnado.idDestinatario_id:
+        # Se filtra en Python sobre `obj.turnados.all()` (no `.filter()`,
+        # que ignoraría el caché y dispararía una query nueva) para
+        # aprovechar el prefetch_related('turnados__idDestinatario') de la
+        # vista y no golpear la BD una vez por cada FUS de la página.
+        turnados_activos = [t for t in obj.turnados.all() if t.activo]
+        if not turnados_activos or not turnados_activos[0].idDestinatario_id:
             return None
-        return _resolver_unidad_administrativa(turnado.idDestinatario)
+        return _resolver_unidad_administrativa(turnados_activos[0].idDestinatario)
 
     def get_tieneTurnado(self, obj):
         # True si el FUS pasó por el flujo de Titular (se turnó a un ROL2)
         # antes de comisionarse, aunque sea a otra dirección — false si el
-        # Particular lo comisionó directo desde "Registrado".
-        return obj.turnados.filter(activo=1).exists()
+        # Particular lo comisionó directo desde "Registrado". Mismo criterio
+        # que get_direccionTitular: se usa `obj.turnados.all()` para
+        # reutilizar el prefetch en vez de `.filter().exists()`.
+        return any(t.activo for t in obj.turnados.all())
 
     def get_slaVencido(self, obj):
         from django.utils import timezone

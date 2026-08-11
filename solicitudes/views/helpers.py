@@ -13,9 +13,14 @@ _log = log_bitacora
 # funciones sobre FUS/Calendario, pero limitado a los FUS del ROL1 que lo registró.
 ROLES_PARTICULAR = ('ROL1', 'EQUIPO_PARTICULAR')
 
-ROL1_ACCIONES = ['REGISTRO_RESPUESTA', 'CONCLUSION_FUS', 'ASIGNACION_ESTADO']
-ROL2_ACCIONES = ['CONCLUSION_FUS', 'REGISTRO_RESPUESTA', 'REGISTRO_ACCION']
-COMISIONADO_ACCIONES = ['ASIGNACION_COMISIONADO', 'SEGUIMIENTO_COMISIONADO', 'ATENCION_FUS', 'APROBACION_FUS', 'RECHAZO_FUS']
+# 'ASIGNACION_ESTADO' y 'REAPERTURA_FUS' se generan como efecto colateral de
+# la primera respuesta/reapertura de ROL2 y del Comisionado (ver
+# SeguimientoListCreateView/MarcarTurnadoAtendidoView en turnado.py y
+# SeguimientoComisionadoListCreateView en comisionado.py) — sin incluirlos
+# aquí, ese propio usuario no podía encontrar esas acciones en su propia
+# Bitácora/Búsqueda Avanzada, aunque él mismo las hubiera hecho.
+ROL2_ACCIONES = ['CONCLUSION_FUS', 'REGISTRO_RESPUESTA', 'REGISTRO_ACCION', 'ASIGNACION_ESTADO', 'REAPERTURA_FUS']
+COMISIONADO_ACCIONES = ['ASIGNACION_COMISIONADO', 'SEGUIMIENTO_COMISIONADO', 'ATENCION_FUS', 'APROBACION_FUS', 'RECHAZO_FUS', 'ASIGNACION_ESTADO', 'REAPERTURA_FUS']
 
 
 def _puede_ver_fus(user, fus):

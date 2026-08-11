@@ -36,7 +36,7 @@ class FUSListCreateView(APIView):
 
         qs = FUS.objects.filter(activo=1).select_related(
             'idSolicitanteInterno', 'idMedioRecepcion'
-        ).prefetch_related('evidencias')
+        ).prefetch_related('evidencias', 'turnados__idDestinatario')
 
         if rol == 'EQUIPO_PARTICULAR':
             propietario = _propietario_fus(request.user)
@@ -45,6 +45,13 @@ class FUSListCreateView(APIView):
         estatus_raw = request.query_params.get('estatusParticular')
         prioridad   = request.query_params.get('prioridad')
         search      = request.query_params.get('search')
+        folio       = request.query_params.get('folio')
+        if folio:
+            # Consulta puntual desde dashboard, notificaciones o bitácora
+            # (mismo criterio que MisTurnadosView.get). Se filtra antes de
+            # paginar para que el FUS se encuentre aunque no esté entre los
+            # más recientes de la bandeja.
+            qs = qs.filter(folio=folio)
         if prioridad:
             qs = qs.filter(prioridad=prioridad)
         if estatus_raw:
@@ -129,8 +136,21 @@ class FUSListCreateView(APIView):
         # tipo de bug ya corregido para fechaLimite/Actividad).
         year  = timezone.localtime(now).year
 
+        # El frontend ya exige estos tres campos antes de enviar el
+        # formulario, pero el backend los aceptaba vacíos sin protestar
+        # (cualquier llamada directa a la API podía crear un FUS sin medio
+        # ni prioridad ni descripción real) — misma regla, del lado servidor.
+        descripcion = data.get('descripcion', '').strip()
+        if len(descripcion) < 20:
+            return Response({'detail': 'La descripción debe tener al menos 20 caracteres.'}, status=400)
+
         medio_id = data.get('idMedioRecepcion')
-        medio    = get_object_or_404(MedioRecepcion, pk=medio_id) if medio_id else None
+        if not medio_id:
+            return Response({'detail': 'Selecciona un medio de recepción.'}, status=400)
+        medio = get_object_or_404(MedioRecepcion, pk=medio_id)
+
+        if not data.get('prioridad'):
+            return Response({'detail': 'Selecciona una prioridad.'}, status=400)
 
         nombre_ext = data.get('nombreExterno', '').strip() or None
         tel_ext    = data.get('telefonoExterno', '').strip() or None
@@ -157,7 +177,7 @@ class FUSListCreateView(APIView):
                         folio=folio,
                         idSolicitanteInterno=propietario,
                         fechaHora=now,
-                        descripcion=data.get('descripcion', ''),
+                        descripcion=descripcion,
                         contexto=data.get('contexto', ''),
                         idMedioRecepcion=medio,
                         medioEspecificacion=data.get('medioEspecificacion', ''),
@@ -245,6 +265,14 @@ class FUSDetailView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Se valida la evidencia ANTES de tocar cualquier campo del FUS: antes
+        # se guardaba fus.save() y solo al final se validaba el archivo, así
+        # que un archivo rechazado (tipo/tamaño inválido) dejaba los cambios
+        # de texto ya persistidos en BD aunque la respuesta fuera un error.
+        err_resp = guardar_evidencias(fus, request, user)
+        if err_resp:
+            return err_resp
+
         data = request.data
         if 'idMedioRecepcion' in data:
             medio_id = data.get('idMedioRecepcion')
@@ -288,10 +316,6 @@ class FUSDetailView(APIView):
                 # (baja lógica, no se borra — mismo criterio que el resto del
                 # calendario).
                 Actividad.objects.filter(idFusRelacionado=fus, tipo='limite').update(activo=0)
-
-        err_resp = guardar_evidencias(fus, request, user)
-        if err_resp:
-            return err_resp
 
         _log(usuario=user.email, rol=rol, accion='REGISTRO_FUS',
              ip=request.META.get('REMOTE_ADDR'), folio=fus.folio, obs='Edición de solicitud')
@@ -347,7 +371,16 @@ class FUSDetalleAuditoriaView(APIView):
                 'autor': resolver_nombre(s.idAutor) if s.idAutor else None,
                 'texto': f'{TIPO_SEG_LABEL.get(s.tipo, s.tipo)}: {s.contenido}',
             })
-        seguimientos.sort(key=lambda s: s['fecha'] or '')
+        # Mezcla tipos no comparables entre sí: `fechaActividad` (Seguimiento,
+        # DateField -> date), `fechaRegistro` (SeguimientoRespuesta,
+        # DateTimeField -> datetime) y None en los seguimientos que el flujo
+        # de validación por persona crea sin fecha (Atendido/Concluido/
+        # Rechazado por el Particular, ver turnado.py) — ordenar directo por
+        # `s['fecha']` truena con "'<' not supported between instances of
+        # 'str' and 'datetime.date'" en cuanto un FUS mezcla ambos casos.
+        # isoformat() normaliza todo a texto comparable sin perder el orden
+        # cronológico real (None se va al principio, como antes).
+        seguimientos.sort(key=lambda s: s['fecha'].isoformat() if s['fecha'] else '')
 
         sol = fus.idSolicitanteInterno
         return Response({

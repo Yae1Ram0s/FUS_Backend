@@ -2,6 +2,7 @@ import datetime
 import os
 
 from django.db.models import Q
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from rest_framework.views import APIView
@@ -14,7 +15,7 @@ from ..helpers import _resolver_unidad_administrativa
 from .helpers import _rol, ROL2_ACCIONES, COMISIONADO_ACCIONES, _metadata_generacion, _propietario_fus
 
 
-BITACORA_COLS_VALIDAS  = ['folio', 'nombre', 'usuario', 'fecha', 'estatus', 'estado_ant', 'estado_nuevo', 'observaciones']
+BITACORA_COLS_VALIDAS  = ['folio', 'nombre', 'usuario', 'fecha', 'estatus', 'estado_ant', 'estado_nuevo', 'observaciones', 'unidadAdministrativa']
 BITACORA_COLS_DEFAULT  = ['folio', 'nombre', 'usuario', 'fecha', 'estatus']
 
 # Estatus de FUS que puede quedar en `estadoNuevo` de un registro de bitácora
@@ -89,11 +90,10 @@ def _parse_fecha_local(fecha_str, fin_de_dia=False):
 
 
 def _aplicar_filtros_bitacora(qs, params, rol):
-    usuario      = params.get('usuario')
-    folio        = params.get('folio')
-    nombre       = params.get('nombre')
-    estatus_fus  = params.get('estatus_fus')
+    folio         = params.get('folio')
+    estatus_lista = params.getlist('estatus_fus')
     unidad_ids   = params.getlist('unidadAdministrativa')
+    usuarios     = params.getlist('usuario')
     fecha_desde  = params.get('fecha_desde')
     fecha_hasta  = params.get('fecha_hasta')
 
@@ -105,12 +105,15 @@ def _aplicar_filtros_bitacora(qs, params, rol):
         else:
             qs = qs.filter(fusFolio__icontains=q)
 
-    if usuario and rol == 'ROL1': qs = qs.filter(usuario__icontains=usuario)
     if folio:       qs = qs.filter(fusFolio__icontains=folio)
 
-    if nombre and rol == 'ROL1':
-        emails = CorreoAutorizado.objects.filter(nombre__icontains=nombre).values_list('email', flat=True)
-        qs = qs.filter(usuario__in=list(emails))
+    # Filtro explícito por responsable — separado de `q` (que ya lo cubre de
+    # forma difusa): permite elegir uno o varios responsables puntuales desde
+    # un buscador con autocompletar, en vez de escribir su correo/nombre a
+    # mano. Solo ROL1 ve quién hizo cada acción (mismo criterio que las
+    # columnas Responsable/Correo — ver esADM en Bitacora.jsx).
+    if usuarios and rol == 'ROL1':
+        qs = qs.filter(usuario__in=usuarios)
 
     if unidad_ids:
         unidad_ids_int = [int(uid) for uid in unidad_ids if str(uid).isdigit()]
@@ -121,20 +124,34 @@ def _aplicar_filtros_bitacora(qs, params, rol):
             ).values_list('email', flat=True)
             qs = qs.filter(usuario__in=list(emails_unidad))
 
-    if estatus_fus == 'Vencido':
-        folios = FUS.objects.filter(estatusParticular_id='Turnado', fechaLimite__lt=timezone.now()).values_list('folio', flat=True)
-        qs = qs.filter(fusFolio__in=list(folios))
-    elif estatus_fus == 'PorVencer':
+    if estatus_lista:
+        # Multi-selección: cada estatus elegido suma registros (OR), igual que
+        # Unidad administrativa/Responsable. Vencido/PorVencer se calculan
+        # sobre el FUS (fechaLimite), el resto sobre el estatus que muestra
+        # CADA fila (estadoNuevo, o si no hay, estadoAnterior — mismo criterio
+        # que estatusDeRegistro() en Bitacora.jsx y que _ordenar_bitacora más
+        # abajo), no el estatus ACTUAL del FUS al que pertenece: filtrar por
+        # FUS.estatusParticular traía todo el historial de cualquier FUS que
+        # hoy esté, por ejemplo, Concluido — incluyendo sus pasos previos
+        # (Atendido, Rechazado...), que es justo lo que este filtro debía
+        # excluir.
         ahora = timezone.now()
-        folios = FUS.objects.filter(
-            estatusParticular_id='Turnado',
-            fechaLimite__gte=ahora,
-            fechaLimite__lte=ahora + datetime.timedelta(hours=24),
-        ).values_list('folio', flat=True)
-        qs = qs.filter(fusFolio__in=list(folios))
-    elif estatus_fus:
-        folios = FUS.objects.filter(estatusParticular_id=estatus_fus).values_list('folio', flat=True)
-        qs = qs.filter(fusFolio__in=list(folios))
+        condiciones = Q()
+        for estatus_fus in estatus_lista:
+            if estatus_fus == 'Vencido':
+                folios = FUS.objects.filter(estatusParticular_id='Turnado', fechaLimite__lt=ahora).values_list('folio', flat=True)
+                condiciones |= Q(fusFolio__in=list(folios))
+            elif estatus_fus == 'PorVencer':
+                folios = FUS.objects.filter(
+                    estatusParticular_id='Turnado',
+                    fechaLimite__gte=ahora,
+                    fechaLimite__lte=ahora + datetime.timedelta(hours=24),
+                ).values_list('folio', flat=True)
+                condiciones |= Q(fusFolio__in=list(folios))
+            else:
+                sin_estado_nuevo = Q(estadoNuevo__isnull=True) | Q(estadoNuevo='')
+                condiciones |= (Q(estadoNuevo=estatus_fus) | (sin_estado_nuevo & Q(estadoAnterior=estatus_fus)))
+        qs = qs.filter(condiciones)
 
     dt_desde = _parse_fecha_local(fecha_desde) if fecha_desde else None
     if dt_desde: qs = qs.filter(fechaHora__gte=dt_desde)
@@ -145,15 +162,38 @@ def _aplicar_filtros_bitacora(qs, params, rol):
     return qs
 
 
+ORDERING_MAP = {'folio': 'fusFolio', 'fecha': 'fechaHora', 'observaciones': 'observaciones'}
+
+
+def _ordenar_bitacora(qs, ordering):
+    """Único punto que decide el orden de la bitácora — usado tanto por la
+    lista en pantalla como por los dos exportadores, para que lo que se ve
+    y lo que se descarga siempre coincidan (antes los exportadores ignoraban
+    `ordering` y salían fijos por fecha, sin importar cómo estuviera
+    ordenada la tabla en pantalla).
+
+    'estatus' no es una columna real: en pantalla se muestra
+    estadoNuevo o, si no hay, estadoAnterior (ver estatusDeRegistro en
+    Bitacora.jsx) — se ordena igual, con Coalesce, para no dejar "fuera de
+    lugar" los registros que solo tienen estadoAnterior."""
+    if not ordering:
+        return qs.order_by('-fechaHora')
+    campo = ordering.lstrip('-')
+    signo = '-' if ordering.startswith('-') else ''
+    if campo == 'estatus':
+        return qs.annotate(_ordenEstatus=Coalesce('estadoNuevo', 'estadoAnterior')).order_by(f'{signo}_ordenEstatus')
+    campo_real = ORDERING_MAP.get(campo)
+    if not campo_real:
+        return qs.order_by('-fechaHora')
+    return qs.order_by(f'{signo}{campo_real}')
+
+
 class BitacoraListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         rol = _rol(request.user)
-        ordering = request.query_params.get('ordering')
-        qs = _bitacora_base_qs(request)
-        if not ordering:
-            qs = qs.order_by('-fechaHora')
+        qs  = _bitacora_base_qs(request)
         qs  = _aplicar_filtros_bitacora(qs, request.query_params, rol)
 
         try:
@@ -162,14 +202,7 @@ class BitacoraListView(APIView):
         except (ValueError, TypeError):
             page, page_size = 1, 50
 
-        ORDERING_MAP = {
-            'folio': 'fusFolio', 'fecha': 'fechaHora', 'estatus': 'estadoNuevo',
-        }
-        if ordering:
-            campo = ordering.lstrip('-')
-            campo_real = ORDERING_MAP.get(campo)
-            if campo_real:
-                qs = qs.order_by(f"{'-' if ordering.startswith('-') else ''}{campo_real}")
+        qs = _ordenar_bitacora(qs, request.query_params.get('ordering'))
 
         total  = qs.count()
         offset = (page - 1) * page_size
@@ -210,24 +243,30 @@ class ExportarBitacoraExcelView(APIView):
         from openpyxl.drawing.image import Image as XLImage
 
         rol = _rol(request.user)
-        qs  = _bitacora_base_qs(request).order_by('-fechaHora')
+        qs  = _bitacora_base_qs(request)
         qs  = _aplicar_filtros_bitacora(qs, request.query_params, rol)
+        qs  = _ordenar_bitacora(qs, request.query_params.get('ordering'))
         columnas = _parse_columnas_bitacora(request)
 
+        emails_qs = qs.values_list('usuario', flat=True).distinct()
         nombres_map = dict(
-            CorreoAutorizado.objects.filter(
-                email__in=qs.values_list('usuario', flat=True).distinct()
-            ).values_list('email', 'nombre')
+            CorreoAutorizado.objects.filter(email__in=emails_qs).values_list('email', 'nombre')
+        )
+        unidades_map = dict(
+            CorreoAutorizado.objects.filter(email__in=emails_qs)
+            .select_related('unidadAdministrativa')
+            .values_list('email', 'unidadAdministrativa__unidadAdministrativa')
         )
         col_defs = {
-            'folio':         ('Folio',           lambda r: r.fusFolio or ''),
-            'nombre':        ('Nombre',          lambda r: nombres_map.get(r.usuario, '')),
-            'usuario':       ('Usuario',         lambda r: r.usuario),
-            'fecha':         ('Fecha y hora',    lambda r: r.fechaHora.strftime('%d/%m/%Y %H:%M:%S') if r.fechaHora else ''),
-            'estatus':       ('Estatus',         lambda r: ESTATUS_LABELS.get(r.estadoNuevo or r.estadoAnterior, r.estadoNuevo or r.estadoAnterior or '')),
-            'estado_ant':    ('Estado anterior', lambda r: r.estadoAnterior or ''),
-            'estado_nuevo':  ('Estado nuevo',    lambda r: r.estadoNuevo or ''),
-            'observaciones': ('Observaciones',   lambda r: r.observaciones or ''),
+            'folio':                ('Folio',                lambda r: r.fusFolio or ''),
+            'nombre':               ('Nombre',                lambda r: nombres_map.get(r.usuario, '')),
+            'usuario':              ('Usuario',                lambda r: r.usuario),
+            'fecha':                ('Fecha y hora',          lambda r: r.fechaHora.strftime('%d/%m/%Y %H:%M:%S') if r.fechaHora else ''),
+            'estatus':              ('Estatus',                lambda r: ESTATUS_LABELS.get(r.estadoNuevo or r.estadoAnterior, r.estadoNuevo or r.estadoAnterior or '')),
+            'estado_ant':           ('Estado anterior',       lambda r: r.estadoAnterior or ''),
+            'estado_nuevo':         ('Estado nuevo',          lambda r: r.estadoNuevo or ''),
+            'observaciones':        ('Observaciones',         lambda r: r.observaciones or ''),
+            'unidadAdministrativa': ('Unidad administrativa', lambda r: unidades_map.get(r.usuario) or ''),
         }
         headers = [col_defs[c][0] for c in columnas]
         n_cols  = len(headers)
@@ -330,28 +369,34 @@ class ExportarBitacoraPDFView(APIView):
         import io
 
         rol = _rol(request.user)
-        qs  = _bitacora_base_qs(request).order_by('-fechaHora')
+        qs  = _bitacora_base_qs(request)
         qs  = _aplicar_filtros_bitacora(qs, request.query_params, rol)
+        qs  = _ordenar_bitacora(qs, request.query_params.get('ordering'))
         columnas = _parse_columnas_bitacora(request)
 
+        emails_qs = qs.values_list('usuario', flat=True).distinct()
         nombres_map = dict(
-            CorreoAutorizado.objects.filter(
-                email__in=qs.values_list('usuario', flat=True).distinct()
-            ).values_list('email', 'nombre')
+            CorreoAutorizado.objects.filter(email__in=emails_qs).values_list('email', 'nombre')
+        )
+        unidades_map = dict(
+            CorreoAutorizado.objects.filter(email__in=emails_qs)
+            .select_related('unidadAdministrativa')
+            .values_list('email', 'unidadAdministrativa__unidadAdministrativa')
         )
 
         styles = getSampleStyleSheet()
         cell_style  = ParagraphStyle('cell', parent=styles['Normal'], fontSize=7.5, leading=10)
 
         col_defs = {
-            'folio':         ('Folio',         lambda r: r.fusFolio or '—'),
-            'nombre':        ('Nombre',        lambda r: nombres_map.get(r.usuario, '—')),
-            'usuario':       ('Usuario',       lambda r: r.usuario),
-            'fecha':         ('Fecha y hora',  lambda r: r.fechaHora.strftime('%d/%m/%Y %H:%M') if r.fechaHora else '—'),
-            'estatus':       ('Estatus',       lambda r: ESTATUS_LABELS.get(r.estadoNuevo or r.estadoAnterior, r.estadoNuevo or r.estadoAnterior or '—')),
-            'estado_ant':    ('Estado ant.',   lambda r: r.estadoAnterior or '—'),
-            'estado_nuevo':  ('Estado nuevo',  lambda r: r.estadoNuevo or '—'),
-            'observaciones': ('Observaciones', lambda r: r.observaciones or '—'),
+            'folio':                ('Folio',                lambda r: r.fusFolio or '—'),
+            'nombre':               ('Nombre',                lambda r: nombres_map.get(r.usuario, '—')),
+            'usuario':              ('Usuario',                lambda r: r.usuario),
+            'fecha':                ('Fecha y hora',          lambda r: r.fechaHora.strftime('%d/%m/%Y %H:%M') if r.fechaHora else '—'),
+            'estatus':              ('Estatus',                lambda r: ESTATUS_LABELS.get(r.estadoNuevo or r.estadoAnterior, r.estadoNuevo or r.estadoAnterior or '—')),
+            'estado_ant':           ('Estado ant.',           lambda r: r.estadoAnterior or '—'),
+            'estado_nuevo':         ('Estado nuevo',          lambda r: r.estadoNuevo or '—'),
+            'observaciones':        ('Observaciones',         lambda r: r.observaciones or '—'),
+            'unidadAdministrativa': ('Unidad administrativa', lambda r: unidades_map.get(r.usuario) or '—'),
         }
         headers = [col_defs[c][0] for c in columnas]
 
