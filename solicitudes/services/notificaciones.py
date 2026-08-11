@@ -28,7 +28,13 @@ TIPO_EVENTO_ASUNTO = {
 
 
 def push_notificacion(notificacion):
-    """Publica una notificación interna en el canal del destinatario."""
+    """Publica una notificación interna en el canal del destinatario, sin
+    interrumpir el flujo si el channel layer falla (mismo criterio que
+    notificar_por_correo). Sin este try/except, un fallo aquí —p. ej. Redis
+    caído o un hiccup transitorio— tumbaba con un 500 la vista que apenas
+    acababa de guardar la transición de estatus (turnar, comisionar, atender,
+    concluir...), aunque el cambio ya estuviera comprometido en BD: el
+    usuario veía "error" en una acción que en realidad sí se aplicó."""
     channel_layer = get_channel_layer()
     if channel_layer is None:
         return
@@ -41,10 +47,16 @@ def push_notificacion(notificacion):
         'leida': False,
         'fechaCreacion': notificacion.fechaGeneracion.isoformat(),
     }
-    async_to_sync(channel_layer.group_send)(
-        f'notificaciones_{notificacion.idDestinatario_id}',
-        {'type': 'nueva_notificacion', 'data': data},
-    )
+    try:
+        async_to_sync(channel_layer.group_send)(
+            f'notificaciones_{notificacion.idDestinatario_id}',
+            {'type': 'nueva_notificacion', 'data': data},
+        )
+    except Exception:
+        logger.exception(
+            'No se pudo publicar la notificación %s en el channel layer',
+            notificacion.id,
+        )
 
 
 def notificar_por_correo(notificacion):
