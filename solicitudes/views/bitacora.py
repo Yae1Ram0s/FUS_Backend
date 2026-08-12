@@ -111,6 +111,7 @@ def _aplicar_filtros_bitacora(qs, params, rol, user=None):
     usuarios     = params.getlist('usuario')
     fecha_desde  = params.get('fecha_desde')
     fecha_hasta  = params.get('fecha_hasta')
+    prioridad    = params.get('prioridad')
 
     q = params.get('q')
     if q:
@@ -191,6 +192,13 @@ def _aplicar_filtros_bitacora(qs, params, rol, user=None):
 
     dt_hasta = _parse_fecha_local(fecha_hasta, fin_de_dia=True) if fecha_hasta else None
     if dt_hasta: qs = qs.filter(fechaHora__lte=dt_hasta)
+
+    if prioridad:
+        # La bitácora no guarda prioridad — se resuelve vía el FUS relacionado
+        # (mismo criterio que Vencido/PorVencer arriba: folios que cumplen la
+        # condición, filtrados por fusFolio).
+        folios_prioridad = FUS.objects.filter(prioridad=prioridad).values_list('folio', flat=True)
+        qs = qs.filter(fusFolio__in=list(folios_prioridad))
 
     return qs
 

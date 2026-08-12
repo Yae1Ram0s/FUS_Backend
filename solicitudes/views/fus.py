@@ -17,7 +17,7 @@ from autenticacion.models import CorreoAutorizado
 from catalogos.models import MedioRecepcion
 from ..models import FUS, Evidencia, Turnado, Actividad, SeguimientoRespuesta
 from ..serializers import FUSSerializer, TurnadoActividadSerializer
-from ..services import generar_folio, guardar_evidencias
+from ..services import generar_folio, guardar_evidencias, eliminar_evidencias
 from ..utils import resolver_nombre
 from ..helpers import _resolver_unidad_administrativa
 from .helpers import _rol, _log, ROLES_PARTICULAR, _propietario_fus, _puede_ver_fus
@@ -264,6 +264,11 @@ class FUSDetailView(APIView):
                 {'detail': 'Solo se puede editar una solicitud en estatus "Registrado".'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        # Baja lógica de evidencias que el usuario quitó al editar, ANTES de
+        # guardar_evidencias: así el tope de 30 MB por FUS (RN-09) ya cuenta
+        # el espacio liberado al calcular si las nuevas evidencias caben.
+        eliminar_evidencias(fus, request)
 
         # Se valida la evidencia ANTES de tocar cualquier campo del FUS: antes
         # se guardaba fus.save() y solo al final se validaba el archivo, así
@@ -695,9 +700,14 @@ def generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL1', turnado_id=No
         if turnados:
             for i, t in enumerate(turnados):
                 dest_nombre = resolver_nombre(t.idDestinatario) if t.idDestinatario else '—'
+                medio_envio = (
+                    f'{t.idMedio.nombreMedio} — {t.medioEspecificacion}'
+                    if t.idMedio and t.idMedio.nombreMedio == 'Otro' and t.medioEspecificacion
+                    else (t.idMedio.nombreMedio if t.idMedio else '—')
+                )
                 turno_data = [
                     fila('Nombre',             dest_nombre),
-                    fila('Medio de envío',     t.idMedio.nombreMedio if t.idMedio else '—'),
+                    fila('Medio de envío',     medio_envio),
                     fila('Fecha y hora',       fmt(t.fechaHoraTurnado)),
                     fila('Texto de la solicitud', t.solicitudTexto or '—'),
                 ]

@@ -50,6 +50,7 @@ class TurnarFUSView(APIView):
         ip            = request.META.get('REMOTE_ADDR')
         destinatarios = request.data.get('destinatarios', [])
         solicitud_txt = request.data.get('solicitudTexto', '')
+        medio_especificacion = request.data.get('medioEspecificacion', '')
         now           = timezone.now()
 
         if not destinatarios:
@@ -81,6 +82,7 @@ class TurnarFUSView(APIView):
                 idRemitente=user,
                 idDestinatario=dest_user,
                 idMedio=medio,
+                medioEspecificacion=medio_especificacion if medio.nombreMedio == 'Otro' else '',
                 solicitudTexto=solicitud_txt,
                 fechaHoraTurnado=now,
                 idUsuarioRegistra=user.id,
@@ -888,27 +890,3 @@ class SeguimientoListCreateView(APIView):
         data['estatusParticular'] = fus.estatusParticular_id
         data['estatusTitular']    = turnado.estatusTitular_id
         return Response(data, status=status.HTTP_201_CREATED)
-
-
-class SeguimientoDeleteView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def delete(self, request, pk):
-        seg = get_object_or_404(Seguimiento, pk=pk, activo=1)
-        if seg.idTurnado.idDestinatario_id != request.user.id:
-            return Response({'detail': 'No autorizado.'}, status=403)
-
-        # Guard: bloquear si el asunto está concluido
-        if seg.idTurnado.estatusTitular_id == 'Concluido':
-            return Response(
-                {'detail': 'No se pueden eliminar respuestas de un asunto ya concluido.'},
-                status=400,
-            )
-
-        seg.activo = 0
-        seg.save()
-
-        _log(usuario=request.user.email, rol=_rol(request.user), accion='ELIMINACION',
-             ip=request.META.get('REMOTE_ADDR'), folio=seg.idTurnado.idFus.folio,
-             obs=f'Eliminó la respuesta/seguimiento del {seg.fechaActividad}: "{seg.descripcionActividad}"')
-        return Response(status=status.HTTP_204_NO_CONTENT)

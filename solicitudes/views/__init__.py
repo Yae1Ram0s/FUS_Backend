@@ -50,7 +50,6 @@ from .turnado import (
     MarcarTurnadoAtendidoView,
     MisTurnadosView,
     RechazarPersonaTurnadoView,
-    SeguimientoDeleteView,
     SeguimientoListCreateView,
     TurnarFUSView,
 )
@@ -97,7 +96,6 @@ __all__ = [
     'RechazarPersonaTurnadoView',
     'RechazarSolicitudView',
     'SeguimientoComisionadoListCreateView',
-    'SeguimientoDeleteView',
     'SeguimientoListCreateView',
     'TurnarFUSView',
 ]

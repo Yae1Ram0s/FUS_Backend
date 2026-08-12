@@ -172,6 +172,12 @@ class Turnado(models.Model):
         MedioRecepcion, on_delete=models.PROTECT, null=True,
         db_column='medio_recepcion_id',
     )
+    # Mismo criterio que FUS.medioEspecificacion: solo se usa cuando idMedio
+    # es el catálogo "Otro" — texto libre que la persona escribe al turnar.
+    medioEspecificacion = models.CharField(
+        max_length=255, null=True, blank=True,
+        db_column='medio_especificacion',
+    )
     solicitudTexto = models.TextField(
         null=True, blank=True, db_column='solicitud_texto',
     )

@@ -74,6 +74,18 @@ def _sha256(archivo):
     return digest.hexdigest()
 
 
+def eliminar_evidencias(fus, request):
+    """Baja lógica (RN de auditoría: no se borra el registro) de evidencias
+    existentes que el usuario quitó al editar el FUS."""
+    try:
+        ids = json.loads(request.data.get('evidenciasEliminar') or '[]')
+    except (ValueError, TypeError):
+        ids = []
+    if not ids:
+        return
+    Evidencia.objects.filter(idFus=fus, pk__in=ids, activo=1).update(activo=0)
+
+
 def guardar_evidencias(fus, request, user):
     """Valida y guarda evidencias; devuelve una respuesta solamente si falla."""
     archivos = request.FILES.getlist('evidencias')

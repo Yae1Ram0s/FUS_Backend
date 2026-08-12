@@ -5,6 +5,7 @@ from email.mime.image import MIMEImage
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
 from django.template.loader import render_to_string
+from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
@@ -59,4 +60,24 @@ def enviar_correo_otp(email, codigo, intro, asunto):
         except OSError:
             logger.warning(f'No se encontró el logo para el correo OTP: {ruta}')
 
-    msg.send(fail_silently=False)
+    # El administrador puede auditar el resultado del proveedor sin acceder
+    # jamás al código. Los OTP históricos permanecen SIN_CONFIRMACION.
+    from .models import CodigoOTP
+    otp = CodigoOTP.objects.filter(email__iexact=email, codigo=codigo).order_by('-id').first()
+    try:
+        enviados = msg.send(fail_silently=False)
+        if otp:
+            otp.estadoEnvio = 'ENVIADO' if enviados else 'ERROR'
+            otp.fechaEnvio = timezone.now() if enviados else None
+            otp.detalleEnvio = '' if enviados else 'El proveedor no confirmó destinatarios.'
+            otp.save(update_fields=['estadoEnvio', 'fechaEnvio', 'detalleEnvio'])
+        return enviados
+    except Exception as exc:
+        if otp:
+            otp.estadoEnvio = 'ERROR'
+            otp.fechaEnvio = None
+            # Solo se conserva el tipo del error; evita credenciales, tokens o
+            # respuestas completas del proveedor en la base de datos.
+            otp.detalleEnvio = f'Error de correo: {exc.__class__.__name__}'[:160]
+            otp.save(update_fields=['estadoEnvio', 'fechaEnvio', 'detalleEnvio'])
+        raise

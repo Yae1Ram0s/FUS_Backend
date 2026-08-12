@@ -17,11 +17,17 @@ class LoginSerializer(serializers.Serializer):
 
 class UsuarioROL2Serializer(serializers.ModelSerializer):
     nombre = serializers.SerializerMethodField()
+    unidadAdministrativa = serializers.SerializerMethodField()
 
     class Meta:
         model  = User
-        fields = ['id', 'first_name', 'last_name', 'email', 'nombre']
+        fields = ['id', 'first_name', 'last_name', 'email', 'nombre', 'unidadAdministrativa']
 
     def get_nombre(self, obj):
         from solicitudes.utils import resolver_nombre
         return resolver_nombre(obj)
+
+    def get_unidadAdministrativa(self, obj):
+        autorizado = CorreoAutorizado.objects.filter(email=obj.email).select_related('unidadAdministrativa').first()
+        unidad = autorizado.unidadAdministrativa if autorizado else None
+        return unidad.unidadAdministrativa if unidad else None

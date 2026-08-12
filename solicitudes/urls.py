@@ -11,7 +11,6 @@ from .views import (
     RechazarPersonaTurnadoView,
     MisTurnadosView,
     SeguimientoListCreateView,
-    SeguimientoDeleteView,
     NotificacionListView,
     NotificacionMarcarLeidaView,
     NotificacionMarcarTodasView,
@@ -76,9 +75,9 @@ urlpatterns = [
     path('turnados/<int:pk>/concluir-persona/', ConcluirPersonaTurnadoView.as_view(), name='turnado-concluir-persona'),
     path('turnados/<int:pk>/rechazar-persona/', RechazarPersonaTurnadoView.as_view(), name='turnado-rechazar-persona'),
 
-    # Seguimientos
+    # Seguimientos — sin endpoint de borrado: ni ROL2 ni Comisionado pueden
+    # eliminar sus respuestas ya registradas.
     path('turnados/<int:turnado_id>/seguimientos/', SeguimientoListCreateView.as_view(), name='seguimientos'),
-    path('seguimientos/<int:pk>/',                  SeguimientoDeleteView.as_view(),     name='seguimiento-delete'),
 
     # Notificaciones (leer-todas/limpiar deben ir antes que <uuid:pk>)
     path('notificaciones/',                         NotificacionListView.as_view(),        name='notificaciones'),

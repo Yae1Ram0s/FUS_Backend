@@ -44,7 +44,7 @@ class FUSSerializer(serializers.ModelSerializer):
     idSolicitanteInterno = UserMiniSerializer(read_only=True)
     idMedioRecepcion     = MedioMiniSerializer(read_only=True)
     idComisionado        = UserMiniSerializer(read_only=True)
-    evidencias           = EvidenciaSerializer(many=True, read_only=True)
+    evidencias           = serializers.SerializerMethodField()
     # Devuelve la clave (string) del FK, igual que antes cuando era CharField
     estatusParticular    = serializers.CharField(source='estatusParticular_id', read_only=True)
     slaVencido           = serializers.SerializerMethodField()
@@ -64,6 +64,9 @@ class FUSSerializer(serializers.ModelSerializer):
             'fechaLimite', 'slaVencido', 'slaPorVencer', 'estadoTemporalidad',
             'idComisionado', 'fechaAsignacion', 'direccionComisionado', 'direccionTitular', 'tieneTurnado',
         ]
+
+    def get_evidencias(self, obj):
+        return EvidenciaSerializer(obj.evidencias.filter(activo=1), many=True).data
 
     def get_direccionComisionado(self, obj):
         if not obj.idComisionado_id:
@@ -324,7 +327,7 @@ class TurnadoSerializer(serializers.ModelSerializer):
         model  = Turnado
         fields = [
             'id', 'idFus', 'idRemitente', 'idDestinatario',
-            'idMedio', 'solicitudTexto', 'fechaHoraTurnado', 'estatusTitular',
+            'idMedio', 'medioEspecificacion', 'solicitudTexto', 'fechaHoraTurnado', 'estatusTitular',
         ]
 
 

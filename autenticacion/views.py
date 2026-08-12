@@ -20,7 +20,8 @@ from rest_framework.throttling import AnonRateThrottle
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 
-from .models import CorreoAutorizado, CodigoOTP
+from .models import CorreoAutorizado, CodigoOTP, SeguridadUsuario
+from .admin_services import emitir_tokens
 from .serializers import LoginSerializer, UsuarioROL2Serializer
 from .emails import enviar_correo_otp
 from .otp import validar_otp
@@ -109,7 +110,16 @@ def _generar_otp(email, ip):
 class VerificarCorreoView(APIView):
     """
     POST { email }
-    Determina si el correo es nuevo (envía OTP) o existente (pide contraseña).
+    Determina si el correo está autorizado y, de estarlo, si ya tiene cuenta
+    (pide contraseña) o es primer ingreso (pasa directo a crearla).
+
+    El paso de código OTP por correo queda suspendido por ahora (ver
+    EstablecerContrasenaView, que ya no lo exige) — antes este endpoint no
+    distinguía "no autorizado" de "primer ingreso" (mismo 'estado': 'nuevo'
+    para ambos) para no revelar la whitelist sin, de todas formas, dejar
+    entrar a nadie sin el código; al quitar ese código, un correo no
+    autorizado debe rechazarse aquí mismo en vez de seguir a crear
+    contraseña.
     """
     permission_classes  = [AllowAny]
     throttle_classes    = [OTPThrottle]
@@ -120,26 +130,14 @@ class VerificarCorreoView(APIView):
             return Response({'detail': 'Correo requerido.'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            autorizado = CorreoAutorizado.objects.get(email=email, activo=1)
+            CorreoAutorizado.objects.get(email=email, activo=1)
         except CorreoAutorizado.DoesNotExist:
-            # No revelar que el correo no está en la whitelist: responder
-            # igual que el flujo "nuevo" (mismo status, mismo shape) pero sin
-            # generar ni enviar OTP, así un atacante no puede usar este
-            # endpoint para descubrir qué direcciones son cuentas
-            # corporativas válidas probando una lista de correos.
-            return Response({'estado': 'nuevo'})
+            return Response({'detail': 'Este correo no está autorizado para acceder al sistema.'}, status=status.HTTP_404_NOT_FOUND)
 
         django_user = User.objects.filter(email=email).first()
         if django_user and django_user.has_usable_password():
             return Response({'estado': 'existente'})
 
-        # Usuario nuevo — generar y enviar OTP
-        codigo = _generar_otp(email, request.META.get('REMOTE_ADDR'))
-        enviar_correo_otp(
-            email, codigo,
-            intro='Recibimos una solicitud de acceso al Sistema de Control de Solicitudes. Utiliza el siguiente código para completar tu inicio de sesión.',
-            asunto='Tu código de acceso — Sistema de Control de Solicitudes',
-        )
         return Response({'estado': 'nuevo'})
 
 
@@ -167,6 +165,12 @@ class EstablecerContrasenaView(APIView):
     """
     POST { email, codigo, password }
     Crea el usuario Django y devuelve tokens JWT.
+
+    `codigo` es opcional mientras el paso de OTP por correo esté suspendido
+    (ver VerificarCorreoView) — si el frontend no manda uno, se omite la
+    validación en vez de rechazar la petición; si algún día se reactiva el
+    envío de OTP, basta con que el frontend vuelva a mandarlo y este mismo
+    bloque lo vuelve a exigir sin más cambios aquí.
     """
     permission_classes = [AllowAny]
     throttle_classes   = [OTPThrottle]
@@ -186,16 +190,19 @@ class EstablecerContrasenaView(APIView):
         except CorreoAutorizado.DoesNotExist:
             return Response({'detail': 'Correo no autorizado.'}, status=status.HTTP_401_UNAUTHORIZED)
 
-        # Todo el tramo (validar OTP, crear el usuario, consumir el OTP)
-        # queda dentro de una sola transacción: el select_for_update() de
-        # validar_otp mantiene el registro bloqueado hasta el commit, así
-        # que dos requests concurrentes con el mismo código nunca lo
-        # consumen dos veces (la segunda vuelve a evaluar `usado=0` ya
-        # bloqueada y encuentra el OTP recién gastado por la primera).
+        # Todo el tramo (validar OTP si aplica, crear el usuario, consumir
+        # el OTP) queda dentro de una sola transacción: el
+        # select_for_update() de validar_otp mantiene el registro bloqueado
+        # hasta el commit, así que dos requests concurrentes con el mismo
+        # código nunca lo consumen dos veces (la segunda vuelve a evaluar
+        # `usado=0` ya bloqueada y encuentra el OTP recién gastado por la
+        # primera).
         with transaction.atomic():
-            otp, error = validar_otp(email, codigo, marcar_usado=False)
-            if error:
-                return Response({'detail': error}, status=status.HTTP_400_BAD_REQUEST)
+            otp = None
+            if codigo:
+                otp, error = validar_otp(email, codigo, marcar_usado=False)
+                if error:
+                    return Response({'detail': error}, status=status.HTTP_400_BAD_REQUEST)
 
             user = User.objects.select_for_update().filter(email=email).first()
             if user and user.has_usable_password():
@@ -212,10 +219,11 @@ class EstablecerContrasenaView(APIView):
             except IntegrityError:
                 return Response({'detail': 'Esta cuenta ya fue creada. Intenta iniciar sesión.'}, status=400)
 
-            otp.usado = 1
-            otp.save(update_fields=['usado'])
+            if otp:
+                otp.usado = 1
+                otp.save(update_fields=['usado'])
 
-        refresh = RefreshToken.for_user(user)
+        refresh = emitir_tokens(user)
         _log(usuario=email, rol=autorizado.rol, accion='REGISTRO', ip=request.META.get('REMOTE_ADDR'))
 
         response = Response({
@@ -308,7 +316,13 @@ class LoginView(APIView):
             return _login_fallido(email)
 
         cache.delete(_login_cache_key(email))
-        refresh = RefreshToken.for_user(user)
+        security, _ = SeguridadUsuario.objects.get_or_create(usuario=user)
+        if security.bloqueadoHasta and security.bloqueadoHasta > timezone.now():
+            return Response({'detail': 'Cuenta bloqueada. Contacta al administrador.', 'code': 'cuenta_bloqueada'}, status=status.HTTP_423_LOCKED)
+        security.intentosFallidos = 0
+        security.ultimoIngreso = timezone.now()
+        security.save(update_fields=['intentosFallidos', 'ultimoIngreso', 'fechaModificacion'])
+        refresh = emitir_tokens(user)
         _log(usuario=email, rol=autorizado.rol, accion='INICIO_SESION', ip=ip)
 
         response = Response({
@@ -319,6 +333,7 @@ class LoginView(APIView):
                 'nombre': autorizado.nombre or f"{user.first_name} {user.last_name}".strip(),
                 'rol':    autorizado.rol,
                 'unidadAdministrativa': autorizado.unidadAdministrativa.unidadAdministrativa if autorizado.unidadAdministrativa_id else None,
+                'requiereCambioContrasena': security.requiereCambioContrasena,
             }
         })
         return _set_refresh_cookie(response, refresh)
@@ -351,6 +366,29 @@ class LogoutView(APIView):
         return response
 
 
+class CambiarContrasenaObligatoriaView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        actual = request.data.get('passwordActual', '')
+        nueva = request.data.get('passwordNueva', '')
+        if not request.user.check_password(actual):
+            return Response({'detail': 'La contraseña actual es incorrecta.'}, status=400)
+        try:
+            validate_password(nueva, request.user)
+        except DjangoValidationError as exc:
+            return Response({'detail': ' '.join(exc.messages)}, status=400)
+        request.user.set_password(nueva)
+        request.user.save(update_fields=['password'])
+        security, _ = SeguridadUsuario.objects.get_or_create(usuario=request.user)
+        security.requiereCambioContrasena = False
+        security.versionSesion += 1
+        security.save(update_fields=['requiereCambioContrasena', 'versionSesion', 'fechaModificacion'])
+        refresh = emitir_tokens(request.user)
+        response = Response({'detail': 'Contraseña actualizada.', 'access': str(refresh.access_token), 'requiereCambioContrasena': False})
+        return _set_refresh_cookie(response, refresh)
+
+
 class CookieTokenRefreshView(APIView):
     """Igual que TokenRefreshView de SimpleJWT, pero lee el refresh token de la
     cookie httpOnly en vez de esperarlo en el body."""
@@ -362,6 +400,10 @@ class CookieTokenRefreshView(APIView):
             return Response({'detail': 'No hay sesión activa.'}, status=status.HTTP_401_UNAUTHORIZED)
         try:
             refresh = RefreshToken(raw_token)
+            user = User.objects.filter(pk=refresh.get('user_id')).first()
+            security = SeguridadUsuario.objects.get_or_create(usuario=user)[0] if user else None
+            if not security or int(refresh.get('sessionVersion', 0)) != security.versionSesion:
+                return Response({'detail': 'La sesión fue revocada.'}, status=status.HTTP_401_UNAUTHORIZED)
         except TokenError:
             return Response({'detail': 'Sesión expirada.'}, status=status.HTTP_401_UNAUTHORIZED)
         return Response({'access': str(refresh.access_token)})
