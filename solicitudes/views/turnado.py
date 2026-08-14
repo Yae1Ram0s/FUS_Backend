@@ -17,7 +17,8 @@ from ..serializers import (
     TurnadoSerializer, TurnadoActividadSerializer, SeguimientoSerializer,
     SeguimientoComisionadoComoActividadSerializer,
 )
-from ..utils import resolver_nombre, _equipo_particular_de
+from ..utils import resolver_nombre, _equipo_particular_de, es_marcador_atendido_o_concluido
+from ..helpers import emails_de_turnados, mapa_correos_autorizados
 from ..services import notificar_por_correo, push_notificacion
 from .comisionado import _quien_comisiono
 from .helpers import (
@@ -269,7 +270,7 @@ class FUSTrazabilidadView(APIView):
             segs = [s for s in t.seguimientos.all() if s.activo]
             for i, s in enumerate(segs):
                 texto = s.descripcionActividad or ''
-                if texto.startswith('Rechazado por el Particular:'):
+                if texto.startswith('Rechazado por '):
                     tipo, actor_evento = 'rechazo', _resolver_actor_seguimiento(s, actor)
                 elif texto == 'Concluido por el Particular.':
                     tipo, actor_evento = 'concluido', _resolver_actor_seguimiento(s, actor)
@@ -356,9 +357,9 @@ class MisTurnadosView(APIView):
         qs = Turnado.objects.filter(
             idDestinatario=request.user, activo=1
         ).select_related(
-            'idFus', 'idFus__idSolicitanteInterno', 'idFus__idMedioRecepcion',
-            'idRemitente', 'idMedio',
-        )
+            'idFus', 'idFus__idSolicitanteInterno', 'idFus__idMedioRecepcion', 'idFus__idComisionado',
+            'idRemitente', 'idDestinatario', 'idMedio',
+        ).prefetch_related('idFus__turnados__idDestinatario', 'idFus__evidencias')
 
         estatus_raw = request.query_params.get('estatusTitular')
         prioridad   = request.query_params.get('prioridad')
@@ -433,7 +434,9 @@ class MisTurnadosView(APIView):
 
         total  = qs.count()
         offset = (page - 1) * page_size
-        data   = TurnadoSerializer(qs[offset: offset + page_size], many=True).data
+        pagina = list(qs[offset: offset + page_size])
+        mapa   = mapa_correos_autorizados(emails_de_turnados(pagina))
+        data   = TurnadoSerializer(pagina, many=True, context={'mapa_correos': mapa}).data
         return Response({'total': total, 'page': page, 'page_size': page_size, 'results': data})
 
 
@@ -632,6 +635,15 @@ class ConcluirPersonaTurnadoView(APIView):
              ip=ip, folio=fus.folio, estado_ant=est_ant, estado_nuevo='Concluido')
 
         destinatario_turnado = turnado.idDestinatario
+        if destinatario_turnado and _rol(destinatario_turnado) == 'ROL2':
+            # El Particular es quien ejecuta la acción, pero el cambio de
+            # estatus es de ESTE turnado — sin este segundo registro (a
+            # nombre del propio Titular), su Bitácora nunca reflejaba que su
+            # parte quedó Concluida, ya que _bitacora_base_qs para ROL2 solo
+            # incluye registros donde `usuario` es él mismo.
+            _log(usuario=destinatario_turnado.email, rol='ROL2', accion='CONCLUSION_FUS',
+                 ip=ip, folio=fus.folio, estado_ant=est_ant, estado_nuevo='Concluido')
+
         if destinatario_turnado:
             concluye_auth = CorreoAutorizado.objects.filter(email=user.email, activo=1).first()
             nombre_concluye = concluye_auth.nombre if concluye_auth else (user.first_name or user.email)
@@ -707,6 +719,10 @@ class RechazarPersonaTurnadoView(APIView):
         rol     = _rol(user)
         fus     = turnado.idFus
         est_ant = turnado.estatusTitular_id
+        # Nombre de quien realmente rechaza (Rol 1 o alguien de su Equipo del
+        # Particular) — antes el texto decía genérico "el Particular", sin
+        # distinguir quién de ese equipo fue.
+        nombre_rechaza = resolver_nombre(user)
 
         turnado.estatusTitular_id = 'Rechazado'
         turnado.idUsuarioModifica = user.id
@@ -714,7 +730,7 @@ class RechazarPersonaTurnadoView(APIView):
 
         Seguimiento.objects.create(
             idTurnado=turnado,
-            descripcionActividad=f'Rechazado por el Particular: {motivo}',
+            descripcionActividad=f'Rechazado por {nombre_rechaza}: {motivo}',
             idUsuarioRegistra=user.id,
         )
 
@@ -722,9 +738,15 @@ class RechazarPersonaTurnadoView(APIView):
              ip=ip, folio=fus.folio, estado_ant=est_ant, estado_nuevo='Rechazado', obs=motivo)
 
         destinatario_turnado = turnado.idDestinatario
+        if destinatario_turnado and _rol(destinatario_turnado) == 'ROL2':
+            # Mismo criterio que ConcluirPersonaTurnadoView: el Particular
+            # ejecuta la acción, pero el cambio es de este turnado — sin este
+            # segundo registro (a nombre del propio Titular), su Bitácora
+            # nunca reflejaba que su parte fue Rechazada.
+            _log(usuario=destinatario_turnado.email, rol='ROL2', accion='RECHAZO_FUS',
+                 ip=ip, folio=fus.folio, estado_ant=est_ant, estado_nuevo='Rechazado', obs=motivo)
+
         if destinatario_turnado:
-            rechaza_auth = CorreoAutorizado.objects.filter(email=user.email, activo=1).first()
-            nombre_rechaza = rechaza_auth.nombre if rechaza_auth else (user.first_name or user.email)
             _notif = Notificacion.objects.create(
                 idDestinatario=destinatario_turnado,
                 fusFolio=fus.folio,
@@ -752,7 +774,13 @@ class SeguimientoListCreateView(APIView):
             return Response({'detail': 'No autorizado.'}, status=403)
 
         fus  = turnado.idFus
-        segs = list(Seguimiento.objects.filter(idTurnado=turnado, activo=1))
+        # Se ocultan los marcadores automáticos de Atendido/Concluido — no
+        # son una respuesta real de la persona, ya se reflejan en los banners
+        # de estatus de este mismo panel (ver Seguimientos en el frontend).
+        segs = [
+            s for s in Seguimiento.objects.filter(idTurnado=turnado, activo=1)
+            if not es_marcador_atendido_o_concluido(s.descripcionActividad)
+        ]
 
         # El motivo del rechazo (RechazarSolicitudView) se guarda en
         # SeguimientoRespuesta sin importar si hay comisionado o no — en el

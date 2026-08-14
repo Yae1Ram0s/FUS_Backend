@@ -30,8 +30,11 @@ media/
 # Respaldos de base de datos — contienen hashes de contraseñas y códigos OTP reales
 backups/
 
-# Logs
+# Logs — la carpeta completa, no solo *.log: RotatingFileHandler (ver
+# settings.py) nombra los respaldos rotados scs.log.1, scs.log.2, etc., que
+# *.log solo no cubre.
 *.log
+logs/
 
 # Sistema operativo
 .DS_Store

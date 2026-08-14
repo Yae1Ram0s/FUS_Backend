@@ -48,10 +48,14 @@ def _ultimo_admin(autorizado):
 
 class AdminResumenView(AdminBaseView):
     def get(self, request):
-        total = CorreoAutorizado.objects.count()
-        activos = CorreoAutorizado.objects.filter(activo=1).count()
-        por_rol = {row['rol']: row['n'] for row in CorreoAutorizado.objects.filter(activo=1).values('rol').annotate(n=Count('id'))}
-        return Response({'usuarios': {'total': total, 'activos': activos, 'inactivos': total - activos, 'administradores': CorreoAutorizado.objects.filter(rol='ADMIN', activo=1).count(), 'porRol': por_rol}, 'seguridad': {'bloqueados': sum(1 for u in User.objects.all() if seguridad(u).bloqueadoHasta and seguridad(u).bloqueadoHasta > timezone.now()), 'requierenCambioContrasena': sum(1 for u in User.objects.all() if seguridad(u).requiereCambioContrasena)}, 'auditoriaUltimas24h': AuditoriaAdministrativa.objects.filter(fechaHora__gte=timezone.now() - timezone.timedelta(days=1)).count()})
+        result = cache.get('admin:resumen')
+        if result is None:
+            total = CorreoAutorizado.objects.count()
+            activos = CorreoAutorizado.objects.filter(activo=1).count()
+            por_rol = {row['rol']: row['n'] for row in CorreoAutorizado.objects.filter(activo=1).values('rol').annotate(n=Count('id'))}
+            result = {'usuarios': {'total': total, 'activos': activos, 'inactivos': total - activos, 'administradores': CorreoAutorizado.objects.filter(rol='ADMIN', activo=1).count(), 'porRol': por_rol}, 'seguridad': {'bloqueados': sum(1 for u in User.objects.all() if seguridad(u).bloqueadoHasta and seguridad(u).bloqueadoHasta > timezone.now()), 'requierenCambioContrasena': sum(1 for u in User.objects.all() if seguridad(u).requiereCambioContrasena)}, 'auditoriaUltimas24h': AuditoriaAdministrativa.objects.filter(fechaHora__gte=timezone.now() - timezone.timedelta(days=1)).count()}
+            cache.set('admin:resumen', result, 30)
+        return Response(result)
 
 
 class AdminMetricasView(AdminBaseView):
@@ -102,7 +106,12 @@ class AdminMetricasView(AdminBaseView):
             'red': {'latenciaBaseDatosMs': db_latency, 'latenciaEndpointMs': round((time.perf_counter() - started) * 1000, 2),
                     'sesionesVigentes': sesiones, 'ipsAdministrativasUnicas': len(auditoria_ips),
                     'ipsOtpUnicas': len(otp_ips), 'actividadPorIp': auditoria_ips, 'otpPorIp': otp_ips,
-                    'websocketConfigurado': bool(getattr(settings, 'CHANNEL_LAYERS', None)),
+                    # CHANNEL_LAYERS siempre tiene algo asignado (Redis o el
+                    # fallback en memoria, ver settings.py) — bool(...) sobre
+                    # eso da True siempre y no distingue el caso peligroso
+                    # (InMemoryChannelLayer con más de un worker: notificaciones
+                    # que nunca llegan entre procesos, sin ningún error visible).
+                    'websocketConfigurado': next(iter(getattr(settings, 'CHANNEL_LAYERS', {'default': {}}).values()), {}).get('BACKEND', '').endswith('RedisChannelLayer'),
                     'correoConfigurado': bool(settings.EMAIL_HOST_USER or 'console' in settings.EMAIL_BACKEND)},
             'definiciones': {'adopcionPct': 'Cuentas que registran al menos un último ingreso / cuentas creadas.',
                              'usuariosConUltimoIngreso': 'Usuarios cuyo último ingreso conocido ocurrió ese día; no representa todos los eventos de acceso.'},
@@ -250,7 +259,7 @@ def _health():
     executor = MigrationExecutor(connection)
     pending = len(executor.migration_plan(executor.loader.graph.leaf_nodes()))
     media = Path(settings.MEDIA_ROOT)
-    return {'estado': 'operativo' if pending == 0 else 'atencion', 'backend': {'ok': True, 'framework': 'Django', 'version': __import__('django').get_version()}, 'baseDatos': {'ok': True, 'motor': connection.vendor, 'latenciaMs': latency}, 'correo': {'configurado': bool(settings.EMAIL_HOST_USER or 'console' in settings.EMAIL_BACKEND), 'backend': settings.EMAIL_BACKEND.rsplit('.', 1)[-1]}, 'websocket': {'configurado': bool(getattr(settings, 'CHANNEL_LAYERS', None)), 'backend': next(iter(getattr(settings, 'CHANNEL_LAYERS', {'default': {}}).values()), {}).get('BACKEND', '').rsplit('.', 1)[-1]}, 'almacenamiento': {'ok': media.exists() or media.parent.exists(), 'tipo': settings.STORAGES['default']['BACKEND'].rsplit('.', 1)[-1]}, 'entorno': {'debug': settings.DEBUG, 'python': platform.python_version(), 'sistema': platform.system()}, 'migraciones': {'pendientes': pending}, 'seguridad': {'intentosOtpFallidos': CodigoOTP.objects.filter(intentosFallidos__gt=0).count()}, 'generadoEn': timezone.now().isoformat()}
+    return {'estado': 'operativo' if pending == 0 else 'atencion', 'backend': {'ok': True, 'framework': 'Django', 'version': __import__('django').get_version()}, 'baseDatos': {'ok': True, 'motor': connection.vendor, 'latenciaMs': latency}, 'correo': {'configurado': bool(settings.EMAIL_HOST_USER or 'console' in settings.EMAIL_BACKEND), 'backend': settings.EMAIL_BACKEND.rsplit('.', 1)[-1]}, 'websocket': {'configurado': next(iter(getattr(settings, 'CHANNEL_LAYERS', {'default': {}}).values()), {}).get('BACKEND', '').endswith('RedisChannelLayer'), 'backend': next(iter(getattr(settings, 'CHANNEL_LAYERS', {'default': {}}).values()), {}).get('BACKEND', '').rsplit('.', 1)[-1]}, 'almacenamiento': {'ok': media.exists() or media.parent.exists(), 'tipo': settings.STORAGES['default']['BACKEND'].rsplit('.', 1)[-1]}, 'entorno': {'debug': settings.DEBUG, 'python': platform.python_version(), 'sistema': platform.system()}, 'migraciones': {'pendientes': pending}, 'seguridad': {'intentosOtpFallidos': CodigoOTP.objects.filter(intentosFallidos__gt=0).count()}, 'generadoEn': timezone.now().isoformat()}
 
 
 class AdminSaludView(AdminBaseView):

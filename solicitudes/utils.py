@@ -42,8 +42,27 @@ def _equipo_particular_de(propietario):
     return User.objects.filter(email__in=emails, is_active=True)
 
 
-def resolver_nombre(user):
-    """Nombre autoritativo del usuario (el mismo que ve en su sesión), con fallback."""
+def es_marcador_atendido_o_concluido(texto):
+    """True si `texto` es el marcador automático de auditoría que
+    MarcarTurnadoAtendidoView/ConcluirPersonaTurnadoView crean en el modelo
+    Seguimiento al marcar un turnado como Atendido/Concluido — no es una
+    respuesta real de la persona turnada (a diferencia del de Rechazado, que
+    sí se muestra, ya con el nombre de quien rechazó en vez de genérico). Se
+    usa para ocultarlo del feed de "Respuestas y seguimiento" que ven Rol 1,
+    Rol 2 y Equipo del Particular."""
+    texto = texto or ''
+    return texto.startswith('Atendido:') or texto == 'Concluido por el Particular.'
+
+
+def resolver_nombre(user, mapa=None):
+    """Nombre autoritativo del usuario (el mismo que ve en su sesión), con
+    fallback. Con `mapa` (ver helpers.mapa_correos_autorizados) no golpea la
+    BD — se usa así en listados para evitar una consulta por usuario."""
+    if mapa is not None:
+        entrada = mapa.get(user.email)
+        if entrada:
+            return entrada['nombre']
+        return f"{user.first_name} {user.last_name}".strip() or user.email
     autorizado = CorreoAutorizado.objects.filter(email=user.email).first()
     if autorizado:
         return autorizado.nombre

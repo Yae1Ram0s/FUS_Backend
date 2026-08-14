@@ -33,6 +33,10 @@ class FUS(models.Model):
         db_column='solicitante_interno_id',
     )
     fechaHora = models.DateTimeField(null=True, blank=True, db_column='fecha_hora')
+    # descripcion/contexto tienen índice FULLTEXT en BD (migración 0033,
+    # RunSQL — MySQL/InnoDB no tiene una clase de índice FULLTEXT de
+    # primera clase en el ORM). Aditivo: la búsqueda en views/fus.py sigue
+    # usando icontains, no MATCH()...AGAINST().
     descripcion = models.TextField()
     contexto = models.TextField()
     idMedioRecepcion = models.ForeignKey(
@@ -110,6 +114,8 @@ class Evidencia(models.Model):
         FUS, on_delete=models.CASCADE, related_name='evidencias',
         db_column='fus_id',
     )
+    # nombreArchivo/comentarios tienen índice FULLTEXT en BD (migración
+    # 0033) — ver nota equivalente en FUS.descripcion.
     nombreArchivo = models.CharField(
         max_length=255, null=True, blank=True, db_column='nombre_archivo',
     )
@@ -178,6 +184,8 @@ class Turnado(models.Model):
         max_length=255, null=True, blank=True,
         db_column='medio_especificacion',
     )
+    # Índice FULLTEXT en BD (migración 0033) — ver nota equivalente en
+    # FUS.descripcion.
     solicitudTexto = models.TextField(
         null=True, blank=True, db_column='solicitud_texto',
     )

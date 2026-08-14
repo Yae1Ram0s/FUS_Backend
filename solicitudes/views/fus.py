@@ -19,7 +19,7 @@ from ..models import FUS, Evidencia, Turnado, Actividad, SeguimientoRespuesta
 from ..serializers import FUSSerializer, TurnadoActividadSerializer
 from ..services import generar_folio, guardar_evidencias, eliminar_evidencias
 from ..utils import resolver_nombre
-from ..helpers import _resolver_unidad_administrativa
+from ..helpers import _resolver_unidad_administrativa, emails_de_fus, mapa_correos_autorizados
 from .helpers import _rol, _log, ROLES_PARTICULAR, _propietario_fus, _puede_ver_fus
 
 
@@ -35,7 +35,7 @@ class FUSListCreateView(APIView):
             return Response({'detail': 'No autorizado.'}, status=403)
 
         qs = FUS.objects.filter(activo=1).select_related(
-            'idSolicitanteInterno', 'idMedioRecepcion'
+            'idSolicitanteInterno', 'idMedioRecepcion', 'idComisionado'
         ).prefetch_related('evidencias', 'turnados__idDestinatario')
 
         if rol == 'EQUIPO_PARTICULAR':
@@ -114,7 +114,9 @@ class FUSListCreateView(APIView):
 
         total  = qs.count()
         offset = (page - 1) * page_size
-        data   = FUSSerializer(qs[offset: offset + page_size], many=True).data
+        pagina = list(qs[offset: offset + page_size])
+        mapa   = mapa_correos_autorizados(emails_de_fus(pagina))
+        data   = FUSSerializer(pagina, many=True, context={'mapa_correos': mapa}).data
         return Response({'total': total, 'page': page, 'page_size': page_size, 'results': data})
 
     def post(self, request):
@@ -543,9 +545,14 @@ def generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL1', turnado_id=No
         return [Paragraph(lbl, st_lbl), Paragraph(str(val) if val else '—', st_val)]
 
     # ── Datos generales ──
+    medio_recepcion = (
+        f'{fus.idMedioRecepcion.nombreMedio} — {fus.medioEspecificacion}'
+        if fus.idMedioRecepcion and fus.idMedioRecepcion.nombreMedio == 'Otro' and fus.medioEspecificacion
+        else (fus.idMedioRecepcion.nombreMedio if fus.idMedioRecepcion else '—')
+    )
     datos = [
         fila('Fecha y hora',        fmt(fus.fechaHora)),
-        fila('Medio de recepción',  fus.idMedioRecepcion.nombreMedio if fus.idMedioRecepcion else '—'),
+        fila('Medio de recepción',  medio_recepcion),
         fila('Solicitante interno', nombre_sol),
     ]
     dt = Table(datos, colWidths=[4*cm, W - 4*cm])
@@ -629,6 +636,17 @@ def generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL1', turnado_id=No
 
     TIPO_SEG_LABEL = dict(SeguimientoRespuesta.TIPO_CHOICES)
 
+    # Marcadores de auditoría que se crean solos al marcar un turnado como
+    # Atendido/Concluido/Rechazado (ver MarcarTurnadoAtendidoView/
+    # ConcluirPersonaTurnadoView/RechazarPersonaTurnadoView) — quedan en la
+    # misma tabla Seguimiento que las respuestas reales que la persona
+    # escribe, pero no son una respuesta; en el PDF, "RESPUESTA Y
+    # SEGUIMIENTO" debe mostrar solo lo segundo.
+    ACCION_PREFIJOS = ('Atendido:', 'Concluido por el Particular.', 'Rechazado por ')
+
+    def _es_respuesta_real(seguimiento):
+        return not (seguimiento.descripcionActividad or '').startswith(ACCION_PREFIJOS)
+
     def _tabla_seg(rows, col1=3*cm):
         t = Table(rows, colWidths=[col1, W - col1])
         t.setStyle(TableStyle([
@@ -674,7 +692,7 @@ def generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL1', turnado_id=No
             elements.append(Spacer(1, 8))
         elif turnados:
             # Sin comisionado: el flujo directo, con sus propias respuestas.
-            turnados_con_seguimiento = [(t, [s for s in t.seguimientos.all() if s.activo]) for t in turnados]
+            turnados_con_seguimiento = [(t, [s for s in t.seguimientos.all() if s.activo and _es_respuesta_real(s)]) for t in turnados]
             turnados_con_seguimiento = [(t, segs) for t, segs in turnados_con_seguimiento if segs]
             if turnados_con_seguimiento:
                 for i, (t, segs) in enumerate(turnados_con_seguimiento):
@@ -718,7 +736,7 @@ def generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL1', turnado_id=No
             algun_bloque = False
             for t in turnados:
                 dest_nombre = resolver_nombre(t.idDestinatario) if t.idDestinatario else '—'
-                propias = [s for s in t.seguimientos.all() if s.activo]
+                propias = [s for s in t.seguimientos.all() if s.activo and _es_respuesta_real(s)]
                 seg_rows = [
                     [Paragraph(s.fechaActividad.strftime('%d/%m/%Y') if s.fechaActividad else '—', st_val),
                      Paragraph((s.descripcionActividad or '—') + (f'<br/>→ {s.accionTexto}' if s.accionTexto else ''), st_val)]

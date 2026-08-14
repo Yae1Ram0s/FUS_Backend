@@ -2,7 +2,7 @@ from rest_framework import serializers
 from django.contrib.auth.models import User
 from catalogos.models import MedioRecepcion
 from .models import FUS, Evidencia, Turnado, Seguimiento, Notificacion, Bitacora, Actividad, SeguimientoRespuesta
-from .utils import resolver_nombre, get_rol
+from .utils import resolver_nombre, get_rol, es_marcador_atendido_o_concluido
 from .helpers import _resolver_unidad_administrativa
 from .permissions import _unidad_id
 from .services.bitacora import estados_visibles_bitacora
@@ -21,10 +21,10 @@ class UserMiniSerializer(serializers.ModelSerializer):
         fields = ['id', 'first_name', 'last_name', 'email', 'nombre', 'area']
 
     def get_nombre(self, obj):
-        return resolver_nombre(obj)
+        return resolver_nombre(obj, self.context.get('mapa_correos'))
 
     def get_area(self, obj):
-        area = _resolver_unidad_administrativa(obj)
+        area = _resolver_unidad_administrativa(obj, self.context.get('mapa_correos'))
         return area if area != 'Sin unidad asignada' else None
 
 
@@ -53,6 +53,7 @@ class FUSSerializer(serializers.ModelSerializer):
     direccionComisionado = serializers.SerializerMethodField()
     direccionTitular     = serializers.SerializerMethodField()
     tieneTurnado         = serializers.SerializerMethodField()
+    estatusVisual        = serializers.SerializerMethodField()
 
     class Meta:
         model  = FUS
@@ -63,15 +64,28 @@ class FUSSerializer(serializers.ModelSerializer):
             'nombreExterno', 'telefonoExterno', 'correoExterno', 'evidencias',
             'fechaLimite', 'slaVencido', 'slaPorVencer', 'estadoTemporalidad',
             'idComisionado', 'fechaAsignacion', 'direccionComisionado', 'direccionTitular', 'tieneTurnado',
+            'estatusVisual',
         ]
 
+    def get_estatusVisual(self, obj):
+        """Con una sola persona, ROL1 ve en la tarjeta el estado de ese
+        turnado. Con varias personas se conserva el estado agregado del FUS."""
+        turnados_activos = [t for t in obj.turnados.all() if t.activo]
+        if len(turnados_activos) == 1:
+            return turnados_activos[0].estatusTitular_id
+        return obj.estatusParticular_id
+
     def get_evidencias(self, obj):
-        return EvidenciaSerializer(obj.evidencias.filter(activo=1), many=True).data
+        # `.all()` + filtro en Python (no `.filter()`, que ignoraría el
+        # caché y dispararía una query nueva) — mismo criterio que
+        # get_direccionTitular de abajo, para aprovechar el
+        # prefetch_related('evidencias') de la vista.
+        return EvidenciaSerializer([e for e in obj.evidencias.all() if e.activo], many=True).data
 
     def get_direccionComisionado(self, obj):
         if not obj.idComisionado_id:
             return None
-        return _resolver_unidad_administrativa(obj.idComisionado)
+        return _resolver_unidad_administrativa(obj.idComisionado, self.context.get('mapa_correos'))
 
     def get_direccionTitular(self, obj):
         # Unidad administrativa del Titular (ROL2) al que se turnó este FUS —
@@ -83,7 +97,7 @@ class FUSSerializer(serializers.ModelSerializer):
         turnados_activos = [t for t in obj.turnados.all() if t.activo]
         if not turnados_activos or not turnados_activos[0].idDestinatario_id:
             return None
-        return _resolver_unidad_administrativa(turnados_activos[0].idDestinatario)
+        return _resolver_unidad_administrativa(turnados_activos[0].idDestinatario, self.context.get('mapa_correos'))
 
     def get_tieneTurnado(self, obj):
         # True si el FUS pasó por el flujo de Titular (se turnó a un ROL2)
@@ -383,7 +397,7 @@ class TurnadoActividadSerializer(serializers.ModelSerializer):
     idDestinatario = UserMiniSerializer(read_only=True)
     idRemitente    = UserMiniSerializer(read_only=True)
     idMedio        = MedioMiniSerializer(read_only=True)
-    seguimientos   = SeguimientoSerializer(many=True, read_only=True)
+    seguimientos   = serializers.SerializerMethodField()
     estatusTitular = serializers.CharField(source='estatusTitular_id', read_only=True)
 
     class Meta:
@@ -393,3 +407,14 @@ class TurnadoActividadSerializer(serializers.ModelSerializer):
             'solicitudTexto', 'fechaHoraTurnado', 'estatusTitular',
             'seguimientos',
         ]
+
+    def get_seguimientos(self, obj):
+        # Se ocultan los marcadores automáticos de Atendido/Concluido — no
+        # son una respuesta real de la persona turnada, y mostrarlos en "Ver
+        # respuestas" (Rol 1/Equipo del Particular) es ruido redundante con
+        # el estatus ya visible. Mismo criterio que SeguimientoListCreateView.
+        visibles = [
+            s for s in obj.seguimientos.all()
+            if not es_marcador_atendido_o_concluido(s.descripcionActividad)
+        ]
+        return SeguimientoSerializer(visibles, many=True).data

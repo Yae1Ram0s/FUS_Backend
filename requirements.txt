@@ -17,12 +17,22 @@ daphne==4.2.2
 # aquí para que un despliegue con Redis no tenga que recordarlo aparte).
 channels-redis==4.3.0
 
-# Base de datos (MySQL)
-mysqlclient==2.2.8; platform_system == "Windows"
+# Backend de CACHES cuando REDIS_URL está definido (ver backend/settings.py);
+# sin ella se usa LocMemCache y esta dependencia no hace falta en tiempo de
+# ejecución, mismo criterio que channels-redis arriba.
+django-redis==7.0.0
 
-# PostgreSQL en producciÃ³n (Neon) mediante DATABASE_URL
+# Base de datos (MySQL) — driver 100% Python: no requiere compilador ni
+# librerías de MySQL instaladas en el sistema (a diferencia de mysqlclient),
+# así que se instala igual en Windows (dev) y Linux (servidor institucional)
+# sin condición de plataforma. Se activa como reemplazo de MySQLdb en
+# backend/backend/__init__.py.
+PyMySQL==1.2.0
+
+# Sirve para leer DATABASE_URL como una sola variable de entorno (incluye
+# esquema mysql://) en vez de host/usuario/password sueltos — ver
+# backend/settings.py.
 dj-database-url>=3.0,<4
-psycopg[binary]>=3.2,<4
 
 # Archivos estÃ¡ticos del admin en Render
 whitenoise[brotli]>=6.9,<7

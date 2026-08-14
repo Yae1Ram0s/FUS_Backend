@@ -120,6 +120,24 @@ else:
         }
     }
 
+# ── Cache — mismo criterio que CHANNEL_LAYERS arriba: Redis si REDIS_URL está
+#    definido (requiere django-redis instalado); si no, LocMemCache (el
+#    default de Django, local a cada proceso — no sirve para compartir cache
+#    entre workers, pero es suficiente para desarrollo con un solo proceso).
+if _redis_url:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django_redis.cache.RedisCache',
+            'LOCATION': _redis_url,
+        }
+    }
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        }
+    }
+
 # ── Base de datos ────────────────────────────────────────────────────────────
 _database_url = os.environ.get('DATABASE_URL', '').strip()
 if _database_url:
@@ -228,3 +246,61 @@ EMAIL_HOST_USER    = os.environ.get('EMAIL_HOST_USER', '')
 EMAIL_HOST_PASSWORD= os.environ.get('EMAIL_HOST_PASSWORD', '')
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'noreply@anam.gob.mx')
 EMAIL_TIMEOUT      = int(os.environ.get('EMAIL_TIMEOUT', 10))
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+# Sin esto, Django usa su configuración por defecto: en producción
+# (DEBUG=False) los errores 500 no van a ningún lado visible salvo que se
+# configure ADMINS (no está configurado aquí). El archivo con rotación no
+# depende de cómo se lance el proceso (systemd+journald o directo) — sigue
+# funcionando aunque el servidor institucional no tenga eso resuelto todavía.
+LOGS_DIR = BASE_DIR / 'logs'
+LOGS_DIR.mkdir(exist_ok=True)
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'detallado': {
+            'format': '{asctime} {levelname} {name} — {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'consola': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'detallado',
+        },
+        'archivo': {
+            'class': 'logging.handlers.RotatingFileHandler',
+            'filename': LOGS_DIR / 'scs.log',
+            'maxBytes': 10 * 1024 * 1024,  # 10 MB por archivo
+            'backupCount': 10,             # ~100 MB en total como máximo
+            'formatter': 'detallado',
+            'encoding': 'utf-8',  # sin esto, en Windows usa cp1252 por defecto y mangle acentos/— del formatter
+        },
+    },
+    'root': {
+        'handlers': ['consola', 'archivo'],
+        'level': 'WARNING',
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['consola', 'archivo'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        # Errores 500 reales — el logger más importante de todos para
+        # enterarse de fallos en producción sin depender de que alguien
+        # reporte que "algo no jaló".
+        'django.request': {
+            'handlers': ['consola', 'archivo'],
+            'level': 'ERROR',
+            'propagate': False,
+        },
+        'django.security': {
+            'handlers': ['consola', 'archivo'],
+            'level': 'WARNING',
+            'propagate': False,
+        },
+    },
+}

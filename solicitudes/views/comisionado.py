@@ -21,6 +21,7 @@ from ..permissions import (
 )
 from ..services import notificar_por_correo, push_notificacion
 from ..utils import _equipo_particular_de
+from ..helpers import emails_de_fus, mapa_correos_autorizados
 from .helpers import _rol, _log, _primer_error
 
 
@@ -129,7 +130,7 @@ class MisFUSComisionadosView(APIView):
     def get(self, request):
         qs = FUS.objects.filter(idComisionado=request.user, activo=1).select_related(
             'idSolicitanteInterno', 'idMedioRecepcion', 'idComisionado'
-        ).prefetch_related('evidencias').order_by('-fechaAsignacion')
+        ).prefetch_related('evidencias', 'turnados__idDestinatario').order_by('-fechaAsignacion')
 
         search = request.query_params.get('search')
         if search:
@@ -143,7 +144,9 @@ class MisFUSComisionadosView(APIView):
 
         total  = qs.count()
         offset = (page - 1) * page_size
-        data   = FUSSerializer(qs[offset: offset + page_size], many=True).data
+        pagina = list(qs[offset: offset + page_size])
+        mapa   = mapa_correos_autorizados(emails_de_fus(pagina))
+        data   = FUSSerializer(pagina, many=True, context={'mapa_correos': mapa}).data
         return Response({'total': total, 'page': page, 'page_size': page_size, 'results': data})
 
 

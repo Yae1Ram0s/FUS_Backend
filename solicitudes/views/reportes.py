@@ -6,7 +6,7 @@ from datetime import date, datetime, time, timedelta
 from io import BytesIO
 
 from django.conf import settings
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.http import FileResponse, Http404, HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -17,6 +17,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from autenticacion.models import CorreoAutorizado
+from ..helpers import emails_de_fus, mapa_correos_autorizados
 from ..models import FUS, ReporteGuardado
 from ..utils import get_rol, resolver_nombre, _propietario_fus
 
@@ -101,7 +102,12 @@ def _fecha_inicio_fin(params):
     fin = parse_date(params.get('fecha_fin', '') or '')
     hoy = timezone.localdate()
     if not inicio:
-        inicio = hoy.replace(month=1, day=1)
+        # Sin fecha explícita: últimos 90 días (antes: 1 de enero del año en
+        # curso a hoy, cada vez más lento según se acumula uso institucional
+        # — con meses de operación, "todo el año" deja de ser un rango que
+        # nadie pidió explícitamente). Si el usuario SÍ manda fecha_inicio,
+        # se respeta tal cual, sin este límite: es una elección informada.
+        inicio = hoy - timedelta(days=90)
     if not fin:
         fin = hoy
     zona = timezone.get_current_timezone()
@@ -156,14 +162,40 @@ def _responsable(fus):
 def _construir_reporte(qs, inicio, fin):
     registros = list(qs)
     ahora = timezone.now()
+
+    # `estados` y `canal_recepcion`: conteo por grupo resuelto en el propio
+    # motor de BD (Count agrupado por estatusParticular_id / nombreMedio) en
+    # vez de acumularlo a mano recorriendo `registros` — mismo Counter, misma
+    # semántica de most_common() que ya consume el resto de la función, solo
+    # cambia de dónde salen los números. `idMedioRecepcion` no se usa para
+    # nada más en el loop de abajo, así que sale de ahí por completo.
+    # El resto de los KPIs (carga/unidades/tiempos/antigüedad/meses/tiempo de
+    # respuesta) se queda en Python: dependen de _responsable()/mapa_unidades
+    # (lógica condicional propia — "quién atiende" no es un simple GROUP BY)
+    # o de reglas de fallback fecha-a-fecha (primer turnado: usa
+    # fechaHoraTurnado y si no hay, fechaRegistro) que un MIN() de columna no
+    # replica igual, y de aritmética de duración cuyo comportamiento no está
+    # garantizado idéntico entre SQLite (desarrollo) y MySQL/Postgres
+    # (producción). Además `registros` ya se recorre completo para `detalle`
+    # sin importar qué se agregue aquí, así que estas dos sí son ganancia
+    # limpia sin volver a pagar ese recorrido.
     estados = Counter()
+    for fila in qs.values('estatusParticular_id').annotate(cantidad=Count('id')):
+        estados[fila['estatusParticular_id'] or 'Sin estado'] += fila['cantidad']
+    canales = Counter()
+    for fila in qs.values('idMedioRecepcion__nombreMedio').annotate(cantidad=Count('id')):
+        canales[fila['idMedioRecepcion__nombreMedio'] or 'Otro'] += fila['cantidad']
+
     meses = defaultdict(lambda: {'registrados': 0, 'concluidos': 0, 'vencidos': 0})
     responsables = defaultdict(lambda: {'asignados': 0, 'pendientes': 0, 'vencidos': 0, 'concluidos': 0})
     unidades = Counter()
     tiempos = Counter({'hasta_1': 0, '1_3': 0, '3_7': 0, 'mas_7': 0})
-    canales = Counter()
     antiguedad = Counter({'0_1': 0, '2_3': 0, '4_5': 0, 'mas_5': 0})
     mapa_unidades = _unidad_por_correo()
+    # Mapa {email: {nombre, unidad}} en una sola consulta — sin esto,
+    # resolver_nombre(responsable) dispara una consulta nueva a
+    # CorreoAutorizado por cada fila del loop de abajo.
+    mapa_nombres = mapa_correos_autorizados(emails_de_fus(registros))
     total_dias = 0
     concluidos_con_tiempo = 0
     total_dias_respuesta = 0
@@ -172,14 +204,11 @@ def _construir_reporte(qs, inicio, fin):
 
     for fus in registros:
         estado = fus.estatusParticular_id or 'Sin estado'
-        estados[estado] += 1
         clave_mes = timezone.localtime(fus.fechaRegistro).strftime('%Y-%m') if fus.fechaRegistro else 'Sin fecha'
         meses[clave_mes]['registrados'] += 1
         vencido = bool(fus.fechaLimite and fus.fechaLimite < ahora and estado != 'Concluido')
         if vencido:
             meses[clave_mes]['vencidos'] += 1
-
-        canales[fus.idMedioRecepcion.nombreMedio if fus.idMedioRecepcion_id else 'Otro'] += 1
 
         # Antigüedad: solo lo que sigue abierto (un FUS ya concluido no tiene
         # "días abierto" que reportar) — mismos umbrales que el dashboard.
@@ -221,7 +250,7 @@ def _construir_reporte(qs, inicio, fin):
                 con_respuesta += 1
 
         responsable = _responsable(fus)
-        nombre_responsable = resolver_nombre(responsable) if responsable else 'Sin responsable'
+        nombre_responsable = resolver_nombre(responsable, mapa_nombres) if responsable else 'Sin responsable'
         carga = responsables[nombre_responsable]
         carga['asignados'] += 1
         carga['concluidos' if estado == 'Concluido' else 'pendientes'] += 1
