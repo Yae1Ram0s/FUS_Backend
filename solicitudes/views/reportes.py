@@ -17,6 +17,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from autenticacion.models import CorreoAutorizado
+from catalogos.models import Estatus, PrioridadCriterio
 from ..helpers import emails_de_fus, mapa_correos_autorizados
 from ..models import FUS, ReporteGuardado
 from ..utils import get_rol, resolver_nombre, _propietario_fus
@@ -121,19 +122,19 @@ def _aplicar_filtros(qs, params):
     inicio, fin = _fecha_inicio_fin(params)
     qs = qs.filter(fechaRegistro__range=(inicio, fin))
     if params.get('estatus'):
-        qs = qs.filter(estatusParticular_id=params['estatus'])
+        qs = qs.filter(estatusParticular_id__in=[x for x in params['estatus'].split(',') if x])
     if params.get('prioridad'):
-        qs = qs.filter(prioridad=params['prioridad'])
+        qs = qs.filter(prioridad__in=[x for x in params['prioridad'].split(',') if x])
     if params.get('responsable'):
-        responsable = params['responsable']
+        responsables = [x for x in params['responsable'].split(',') if x]
         qs = qs.filter(
-            Q(idComisionado_id=responsable) |
-            Q(turnados__idDestinatario_id=responsable, turnados__activo=1)
+            Q(idComisionado_id__in=responsables) |
+            Q(turnados__idDestinatario_id__in=responsables, turnados__activo=1)
         ).distinct()
     unidad = params.get('unidad')
     if unidad:
         correos = CorreoAutorizado.objects.filter(
-            unidadAdministrativa_id=unidad, activo=1
+            unidadAdministrativa_id__in=[x for x in unidad.split(',') if x], activo=1
         ).values_list('email', flat=True)
         qs = qs.filter(idSolicitanteInterno__email__in=correos)
     return qs.order_by('fechaRegistro'), inicio, fin
@@ -441,13 +442,34 @@ class ReporteOpcionesView(APIView):
         ).values('unidadAdministrativa_id', 'unidadAdministrativa__unidadAdministrativa').distinct()
         responsables = CorreoAutorizado.objects.filter(
             activo=1, rol__in=('ROL2', 'COMISIONADO')
-        ).order_by('nombre').values('email', 'nombre')
+        ).order_by('nombre').values(
+            'email', 'nombre', 'unidadAdministrativa__unidadAdministrativa'
+        )
         from django.contrib.auth.models import User
         ids = {u.email: u.id for u in User.objects.filter(email__in=[r['email'] for r in responsables])}
         return Response({
             'secciones': [{'id': k, 'nombre': v} for k, v in SECCIONES.items()],
             'unidades': [{'id': x['unidadAdministrativa_id'], 'nombre': x['unidadAdministrativa__unidadAdministrativa']} for x in unidades],
-            'responsables': [{'id': ids.get(x['email']), 'nombre': x['nombre']} for x in responsables if ids.get(x['email'])],
+            'responsables': [
+                {
+                    'id': ids.get(x['email']),
+                    'nombre': x['nombre'],
+                    'descripcion': ' · '.join(filter(None, (
+                        x['email'], x['unidadAdministrativa__unidadAdministrativa'],
+                    ))),
+                }
+                for x in responsables if ids.get(x['email'])
+            ],
+            'estados': [
+                {'id': e.clave, 'nombre': e.nombre}
+                for e in Estatus.objects.filter(
+                    activa=True, tipoFlujo__in=('PARTICULAR', 'AMBOS')
+                )
+            ],
+            'prioridades': [
+                {'id': nivel, 'nombre': nivel}
+                for nivel, _nombre in PrioridadCriterio.NIVEL_CHOICES
+            ],
         })
 
 
