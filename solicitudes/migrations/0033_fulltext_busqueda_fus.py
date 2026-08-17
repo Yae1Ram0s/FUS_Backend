@@ -12,13 +12,11 @@
 # una clase de índice FULLTEXT de primera clase para MySQL en el ORM, así
 # que se crea con RunSQL directo.
 #
-# Alcance deliberadamente limitado: esta migración SOLO agrega los índices.
-# No toca views/fus.py ni cambia `icontains` por `MATCH()...AGAINST()` —
-# ese cambio altera la semántica de la búsqueda (tokenización, longitud
-# mínima de palabra, stopwords en modo lenguaje natural) y es una decisión
-# de producto que se revisa aparte. Con el índice presente pero sin usarse
-# todavía en la query, el comportamiento de búsqueda actual no cambia en
-# absoluto — es puramente aditivo.
+# Alcance original: esta migración solo agregaba los índices, sin tocar
+# views/fus.py. views/fus.py ya usa estos índices vía MATCH()...AGAINST()
+# IN BOOLEAN MODE (ver FUSListCreateView.get / _termino_fulltext_booleano) —
+# con respaldo a icontains cuando el término de búsqueda es más corto que
+# innodb_ft_min_token_size, para no perder resultados en ese caso.
 #
 # Columnas elegidas — las de texto libre más buscadas y con mayor volumen
 # de contenido, mapeadas 1:1 al patrón OR-entre-columnas que ya usa la

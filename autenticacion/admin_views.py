@@ -259,7 +259,58 @@ def _health():
     executor = MigrationExecutor(connection)
     pending = len(executor.migration_plan(executor.loader.graph.leaf_nodes()))
     media = Path(settings.MEDIA_ROOT)
-    return {'estado': 'operativo' if pending == 0 else 'atencion', 'backend': {'ok': True, 'framework': 'Django', 'version': __import__('django').get_version()}, 'baseDatos': {'ok': True, 'motor': connection.vendor, 'latenciaMs': latency}, 'correo': {'configurado': bool(settings.EMAIL_HOST_USER or 'console' in settings.EMAIL_BACKEND), 'backend': settings.EMAIL_BACKEND.rsplit('.', 1)[-1]}, 'websocket': {'configurado': next(iter(getattr(settings, 'CHANNEL_LAYERS', {'default': {}}).values()), {}).get('BACKEND', '').endswith('RedisChannelLayer'), 'backend': next(iter(getattr(settings, 'CHANNEL_LAYERS', {'default': {}}).values()), {}).get('BACKEND', '').rsplit('.', 1)[-1]}, 'almacenamiento': {'ok': media.exists() or media.parent.exists(), 'tipo': settings.STORAGES['default']['BACKEND'].rsplit('.', 1)[-1]}, 'entorno': {'debug': settings.DEBUG, 'python': platform.python_version(), 'sistema': platform.system()}, 'migraciones': {'pendientes': pending}, 'seguridad': {'intentosOtpFallidos': CodigoOTP.objects.filter(intentosFallidos__gt=0).count()}, 'generadoEn': timezone.now().isoformat()}
+    channel_backend = next(
+        iter(getattr(settings, 'CHANNEL_LAYERS', {'default': {}}).values()), {}
+    ).get('BACKEND', '')
+    websocket_distribuido = channel_backend.endswith('RedisChannelLayer')
+    websocket = {
+        'configurado': websocket_distribuido,
+        'backend': channel_backend.rsplit('.', 1)[-1] or 'Sin configurar',
+    }
+    if not websocket_distribuido:
+        websocket.update({
+            'codigo': 'WS_MEMORIA_LOCAL',
+            'diagnostico': (
+                'Las notificaciones en tiempo real usan memoria local. '
+                'WebSocket puede funcionar con un solo proceso, pero los eventos no se comparten entre procesos.'
+            ),
+            'impacto': (
+                'En producción, algunos usuarios podrían no recibir notificaciones o actualizaciones en vivo '
+                'si la petición y la conexión WebSocket llegan a procesos distintos.'
+            ),
+            'recomendacion': (
+                'Configura una capa de canales compartida con Redis y reinicia todos los procesos del backend.'
+            ),
+            'comprobaciones': [
+                {'etiqueta': 'Capa activa', 'valor': 'Memoria local'},
+                {'etiqueta': 'Uso recomendado', 'valor': 'Desarrollo o un solo proceso'},
+                {'etiqueta': 'Multiproceso', 'valor': 'No compatible'},
+            ],
+        })
+    return {
+        'estado': 'operativo' if pending == 0 and websocket_distribuido else 'atencion',
+        'backend': {'ok': True, 'framework': 'Django', 'version': __import__('django').get_version()},
+        'baseDatos': {'ok': True, 'motor': connection.vendor, 'latenciaMs': latency},
+        'correo': {
+            'configurado': bool(settings.EMAIL_HOST_USER or 'console' in settings.EMAIL_BACKEND),
+            'backend': settings.EMAIL_BACKEND.rsplit('.', 1)[-1],
+        },
+        'websocket': websocket,
+        'almacenamiento': {
+            'ok': media.exists() or media.parent.exists(),
+            'tipo': settings.STORAGES['default']['BACKEND'].rsplit('.', 1)[-1],
+        },
+        'entorno': {
+            'debug': settings.DEBUG,
+            'python': platform.python_version(),
+            'sistema': platform.system(),
+        },
+        'migraciones': {'pendientes': pending},
+        'seguridad': {
+            'intentosOtpFallidos': CodigoOTP.objects.filter(intentosFallidos__gt=0).count(),
+        },
+        'generadoEn': timezone.now().isoformat(),
+    }
 
 
 class AdminSaludView(AdminBaseView):

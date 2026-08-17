@@ -41,6 +41,7 @@ from .views import (
     ReporteGuardadoListView,
     ReporteGuardadoDescargarView,
     ReporteTitularExportarExcelView,
+    ReporteTitularExportarPDFView,
     ReporteTitularOpcionesView,
     ReporteTitularResumenView,
 )
@@ -59,6 +60,7 @@ urlpatterns = [
     path('reportes/titular/resumen/',        ReporteTitularResumenView.as_view(),        name='reportes-titular-resumen'),
     path('reportes/titular/opciones/',       ReporteTitularOpcionesView.as_view(),       name='reportes-titular-opciones'),
     path('reportes/titular/exportar/excel/', ReporteTitularExportarExcelView.as_view(),  name='reportes-titular-excel'),
+    path('reportes/titular/exportar/pdf/',   ReporteTitularExportarPDFView.as_view(),    name='reportes-titular-pdf'),
 
     # FUS
     path('fus/',                               FUSListCreateView.as_view(),      name='fus-list-create'),

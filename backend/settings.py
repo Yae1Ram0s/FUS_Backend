@@ -138,6 +138,23 @@ else:
         }
     }
 
+# ── Cola de tareas (django-rq) — requiere Redis de verdad, a diferencia de
+#    CHANNEL_LAYERS/CACHES arriba no hay equivalente "en memoria" para una
+#    cola de tareas real. Con REDIS_URL definido, reemplaza los
+#    threading.Thread sueltos de notificar_por_correo() (ver
+#    services/notificaciones.py) por trabajos encolados con reintento
+#    automático. Sin REDIS_URL (dev local sin Redis), 'django_rq' ni
+#    siquiera se instala en INSTALLED_APPS y notificar_por_correo() sigue
+#    con el hilo suelto de respaldo — mismo comportamiento que antes.
+if _redis_url:
+    INSTALLED_APPS.append('django_rq')
+    RQ_QUEUES = {
+        'default': {
+            'URL': _redis_url,
+            'DEFAULT_TIMEOUT': 360,
+        },
+    }
+
 # ── Base de datos ────────────────────────────────────────────────────────────
 _database_url = os.environ.get('DATABASE_URL', '').strip()
 if _database_url:

@@ -1,8 +1,10 @@
 import os
+import re
 
 from django.conf import settings
 from django.contrib.auth.models import User
-from django.db.models import Q
+from django.db.models import Q, FloatField
+from django.db.models.expressions import RawSQL
 from django.http import FileResponse, Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -24,6 +26,30 @@ from .helpers import _rol, _log, ROLES_PARTICULAR, _propietario_fus, _puede_ver_
 
 
 # ── FUS ─────────────────────────────────────────────────────────────────────
+
+# Caracteres con significado especial en MATCH()...AGAINST(... IN BOOLEAN
+# MODE) (+ - > < ( ) ~ * " @) — se quitan de cada palabra para que el texto
+# de búsqueda del usuario nunca se interprete como operador de búsqueda.
+_FULLTEXT_OPERADORES = re.compile(r'[+\-><()~*"@]')
+# innodb_ft_min_token_size por defecto en MySQL/InnoDB — palabras más cortas
+# no están en el índice FULLTEXT y MATCH() nunca las encuentra.
+_FULLTEXT_MIN_TOKEN = 3
+
+
+def _termino_fulltext_booleano(search):
+    """Arma el término para MATCH()...AGAINST(... IN BOOLEAN MODE) a partir
+    de texto libre: separa por palabras, limpia operadores de modo booleano
+    y agrega '*' a cada palabra para aproximar el "contiene" de icontains.
+    Devuelve None si ninguna palabra alcanza innodb_ft_min_token_size — en
+    ese caso el llamador debe seguir usando icontains para esas columnas,
+    porque el índice no las cubre y MATCH() no encontraría nada."""
+    palabras = []
+    for palabra in search.split():
+        limpia = _FULLTEXT_OPERADORES.sub('', palabra)
+        if len(limpia) >= _FULLTEXT_MIN_TOKEN:
+            palabras.append(f'{limpia}*')
+    return ' '.join(palabras) if palabras else None
+
 
 class FUSListCreateView(APIView):
     permission_classes = [IsAuthenticated]
@@ -79,10 +105,11 @@ class FUSListCreateView(APIView):
             qs = qs.filter(q_estatus)
         if search:
             emails_nombre = list(CorreoAutorizado.objects.filter(nombre__icontains=search).values_list('email', flat=True))
-            qs = qs.filter(
+            # Columnas sin índice FULLTEXT (campos cortos/estructurados,
+            # donde lo que se busca es una subcadena: parte de un teléfono,
+            # un dominio de correo) — siguen con icontains, sin cambios.
+            condiciones = (
                 Q(folio__icontains=search) |
-                Q(descripcion__icontains=search) |
-                Q(contexto__icontains=search) |
                 Q(medioEspecificacion__icontains=search) |
                 Q(criterios__icontains=search) |
                 Q(nombreExterno__icontains=search) |
@@ -91,9 +118,6 @@ class FUSListCreateView(APIView):
                 Q(idMedioRecepcion__nombreMedio__icontains=search) |
                 Q(idSolicitanteInterno__email__icontains=search) |
                 Q(idSolicitanteInterno__email__in=emails_nombre) |
-                Q(evidencias__nombreArchivo__icontains=search) |
-                Q(evidencias__comentarios__icontains=search) |
-                Q(turnados__solicitudTexto__icontains=search) |
                 Q(turnados__idMedio__nombreMedio__icontains=search) |
                 Q(turnados__idRemitente__email__icontains=search) |
                 Q(turnados__idRemitente__email__in=emails_nombre) |
@@ -101,7 +125,50 @@ class FUSListCreateView(APIView):
                 Q(turnados__idDestinatario__email__in=emails_nombre) |
                 Q(turnados__seguimientos__descripcionActividad__icontains=search) |
                 Q(turnados__seguimientos__accionTexto__icontains=search)
-            ).distinct()
+            )
+            termino_fulltext = _termino_fulltext_booleano(search)
+            if termino_fulltext:
+                # Migración 0033: usa los índices FULLTEXT de
+                # descripcion/contexto, evidencias y turnados en vez del
+                # escaneo multi-tabla con icontains. Cada MATCH() corre
+                # sobre su propia tabla base (sin depender del alias que
+                # arme el ORM para los JOIN de evidencias__/turnados__) y
+                # se pliega de vuelta a IDs de FUS.
+                ids_por_fus = FUS.objects.annotate(
+                    _rel=RawSQL(
+                        'MATCH(descripcion, contexto) AGAINST (%s IN BOOLEAN MODE)',
+                        [termino_fulltext], output_field=FloatField(),
+                    )
+                ).filter(_rel__gt=0).values('pk')
+                ids_por_evidencia = Evidencia.objects.annotate(
+                    _rel=RawSQL(
+                        'MATCH(nombre_archivo, comentarios) AGAINST (%s IN BOOLEAN MODE)',
+                        [termino_fulltext], output_field=FloatField(),
+                    )
+                ).filter(_rel__gt=0).values('idFus')
+                ids_por_turnado = Turnado.objects.annotate(
+                    _rel=RawSQL(
+                        'MATCH(solicitud_texto) AGAINST (%s IN BOOLEAN MODE)',
+                        [termino_fulltext], output_field=FloatField(),
+                    )
+                ).filter(_rel__gt=0).values('idFus')
+                condiciones |= (
+                    Q(pk__in=ids_por_fus) |
+                    Q(pk__in=ids_por_evidencia) |
+                    Q(pk__in=ids_por_turnado)
+                )
+            else:
+                # Término demasiado corto para el índice FULLTEXT
+                # (innodb_ft_min_token_size) — respaldo con icontains para
+                # no perder resultados que sí encontraba antes.
+                condiciones |= (
+                    Q(descripcion__icontains=search) |
+                    Q(contexto__icontains=search) |
+                    Q(evidencias__nombreArchivo__icontains=search) |
+                    Q(evidencias__comentarios__icontains=search) |
+                    Q(turnados__solicitudTexto__icontains=search)
+                )
+            qs = qs.filter(condiciones).distinct()
 
         qs = qs.order_by('-fechaRegistro')
 

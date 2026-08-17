@@ -374,6 +374,8 @@ class CambiarContrasenaObligatoriaView(APIView):
         nueva = request.data.get('passwordNueva', '')
         if not request.user.check_password(actual):
             return Response({'detail': 'La contraseña actual es incorrecta.'}, status=400)
+        if actual == nueva:
+            return Response({'detail': 'La nueva contraseña debe ser diferente de la contraseña temporal.'}, status=400)
         try:
             validate_password(nueva, request.user)
         except DjangoValidationError as exc:

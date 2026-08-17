@@ -62,47 +62,121 @@ def push_notificacion(notificacion):
 
 
 def notificar_por_correo(notificacion):
-    """Dispara el envío en un hilo aparte y regresa de inmediato. El envío
+    """Encola/dispara el envío de UNA notificación — ver notificar_por_correo_lote,
+    que hace lo mismo para varias notificaciones del mismo FUS a la vez
+    (turnar a N destinatarios) sin repetir la consulta al FUS por cada una."""
+    notificar_por_correo_lote([notificacion])
+
+
+def notificar_por_correo_lote(notificaciones):
+    """Encola el envío (django-rq, si REDIS_URL está definido) o lo dispara
+    en un hilo aparte (respaldo sin Redis) y regresa de inmediato. El envío
     puede tardar varios segundos (generación del PDF adjunto + handshake
     SMTP) y no hay razón para que la vista que disparó la notificación
     —turnar, comisionar, atender, concluir...— espere eso antes de responder
     al usuario; antes esto corría en línea y era la causa principal de que
     turnar un FUS a varios Titulares se sintiera lento.
 
-    Contraparte: un fallo de envío (SMTP caído, PDF que no se pudo generar)
-    solo queda registrado en el log de `_enviar_correo` — sin reintento
-    automático ni forma de verlo desde la UI. Si eso llega a ser un problema
-    real, el siguiente paso es una cola de tareas de verdad (django-rq sobre
-    el mismo Redis que ya usan los Channels), no otro hilo suelto."""
-    # `on_commit` (no arrancar el hilo directo): la mayoría de las vistas que
-    # llaman a esto (turnar, comisionar, atender, concluir) están envueltas
-    # en `@transaction.atomic` con `select_for_update()`. Si el hilo arranca
-    # antes del commit, corre en OTRA conexión que no ve esa transacción
-    # todavía abierta: el `FUS.objects.get(...)` de abajo le sale
-    # `DoesNotExist` (o datos viejos, según el motor) aunque el turnado ya se
-    # haya guardado bien. `on_commit` difiere el arranque del hilo hasta que
-    # la transacción de la vista ya cerró — y si la vista NO está en una
-    # transacción explícita (autocommit), Django lo ejecuta de inmediato, así
-    # que no cambia nada para esos casos.
-    transaction.on_commit(
-        lambda: threading.Thread(target=_enviar_correo, args=(notificacion,), daemon=True).start()
-    )
+    Pensada para varias notificaciones creadas en la MISMA acción (ej. turnar
+    un FUS a N destinatarios): se encola/dispara un único trabajo que
+    procesa todo el lote junto, así la consulta al FUS con su
+    select_related/prefetch_related se hace una sola vez y no una vez por
+    destinatario (Hallazgo 3.2 de la auditoría — antes turnar a 5 Titulares
+    disparaba 5 hilos, cada uno con su propia consulta completa al FUS). El
+    PDF adjunto sigue generándose por separado para cada destinatario: no es
+    el mismo documento — cada uno solo debe ver sus propios turnados/
+    respuestas, nunca los de otro destinatario turnado al mismo FUS.
+
+    Con la cola real (RQ_QUEUES configurado): 3 reintentos con backoff
+    (10s/30s/60s) si el envío falla — antes un fallo (SMTP caído, PDF que no
+    se pudo generar) solo quedaba registrado en el log, sin reintento
+    automático ni forma de verlo desde la UI."""
+    notificaciones = [n for n in notificaciones if n is not None]
+    if not notificaciones:
+        return
+    ids = [n.id for n in notificaciones]
+    # `on_commit` (no encolar/arrancar el hilo directo): la mayoría de las
+    # vistas que llaman a esto (turnar, comisionar, atender, concluir) están
+    # envueltas en `@transaction.atomic` con `select_for_update()`. Si el
+    # trabajo arranca antes del commit, corre en OTRA conexión que no ve esa
+    # transacción todavía abierta: el `Notificacion.objects.filter(...)` de
+    # abajo no encuentra nada (o ve datos viejos, según el motor) aunque las
+    # notificaciones ya se hayan guardado bien. `on_commit` difiere el
+    # arranque hasta que la transacción de la vista ya cerró — y si la vista
+    # NO está en una transacción explícita (autocommit), Django lo ejecuta de
+    # inmediato, así que no cambia nada para esos casos.
+    if getattr(settings, 'RQ_QUEUES', None):
+        import django_rq
+        from rq import Retry
+        transaction.on_commit(
+            lambda: django_rq.get_queue().enqueue(
+                _enviar_correos_lote, ids,
+                retry=Retry(max=3, interval=[10, 30, 60]),
+            )
+        )
+    else:
+        transaction.on_commit(
+            lambda: threading.Thread(target=_enviar_correos_lote, args=(ids,), daemon=True).start()
+        )
 
 
-def _enviar_correo(notificacion):
+def _cargar_fus_para_correo(folio):
+    from ..models import FUS
+    return FUS.objects.select_related(
+        'idSolicitanteInterno',
+        'idMedioRecepcion',
+        'estatusParticular',
+    ).prefetch_related(
+        'evidencias',
+        'turnados__idDestinatario',
+        'turnados__idMedio',
+        'turnados__seguimientos',
+    ).get(folio=folio, activo=1)
+
+
+def _enviar_correos_lote(notificacion_ids):
+    # Se reciben ids (no los objetos) a propósito: tanto el hilo suelto de
+    # respaldo como, sobre todo, el trabajo encolado en RQ pueden ejecutarse
+    # segundos o minutos después de armar las notificaciones, en un proceso
+    # aparte (el worker) — reusar las instancias originales arriesga operar
+    # sobre objetos desconectados o desactualizados; recargarlas aquí siempre
+    # trae el estado real al momento de enviar.
     try:
-        destinatario = notificacion.idDestinatario
-        if not destinatario or not destinatario.email:
-            return
-        _enviar_correo_a(notificacion, destinatario)
+        from ..models import Notificacion
+        notificaciones = list(
+            Notificacion.objects.filter(pk__in=notificacion_ids).select_related('idDestinatario')
+        )
+        # Cache del FUS por folio dentro de este lote — normalmente todas las
+        # notificaciones del lote comparten el mismo FUS (turnar a N
+        # destinatarios), así que en el caso común esto es una sola consulta
+        # para todo el lote, no una por destinatario.
+        fus_por_folio = {}
+        for notificacion in notificaciones:
+            destinatario = notificacion.idDestinatario
+            if not destinatario or not destinatario.email:
+                continue
+            fus = None
+            folio = notificacion.fusFolio
+            if folio:
+                if folio not in fus_por_folio:
+                    try:
+                        fus_por_folio[folio] = _cargar_fus_para_correo(folio)
+                    except Exception:
+                        logger.exception(
+                            'No se pudo cargar el FUS %s para el lote de correos', folio,
+                        )
+                        fus_por_folio[folio] = None
+                fus = fus_por_folio[folio]
+            _enviar_correo_a(notificacion, destinatario, fus=fus)
     finally:
         # Django solo cierra las conexiones a BD automáticamente al final de
-        # un request/response normal — en un hilo levantado a mano hay que
-        # hacerlo explícito, o cada envío deja una conexión huérfana abierta.
+        # un request/response normal — en un hilo o worker levantado aparte
+        # hay que hacerlo explícito, o cada envío deja una conexión huérfana
+        # abierta.
         connections.close_all()
 
 
-def _enviar_correo_a(notificacion, destinatario):
+def _enviar_correo_a(notificacion, destinatario, fus=None):
     asunto_template = TIPO_EVENTO_ASUNTO.get(
         notificacion.tipoEvento,
         'Actualización de FUS — {folio}',
@@ -146,19 +220,14 @@ def _enviar_correo_a(notificacion, destinatario):
         # en el log — puro ruido, sin ningún caso real que cubrir.
         if notificacion.fusFolio:
             try:
-                from ..models import FUS
                 from ..views.fus import generar_pdf_fus
 
-                fus = FUS.objects.select_related(
-                    'idSolicitanteInterno',
-                    'idMedioRecepcion',
-                    'estatusParticular',
-                ).prefetch_related(
-                    'evidencias',
-                    'turnados__idDestinatario',
-                    'turnados__idMedio',
-                    'turnados__seguimientos',
-                ).get(folio=notificacion.fusFolio, activo=1)
+                # `fus` ya viene cargado cuando este envío es parte de un
+                # lote (ver _enviar_correos_lote) — evita repetir la misma
+                # consulta con select_related/prefetch_related por cada
+                # destinatario del mismo FUS.
+                if fus is None:
+                    fus = _cargar_fus_para_correo(notificacion.fusFolio)
                 pdf_bytes = generar_pdf_fus(
                     fus,
                     incluir_imagenes=False,

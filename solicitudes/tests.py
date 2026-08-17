@@ -1,14 +1,17 @@
 import os
 import tempfile
+from datetime import timedelta
+from unittest.mock import MagicMock, patch
 
 from django.contrib.auth.models import User
 from django.test import override_settings
+from django.utils import timezone
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.test import APITestCase, APITransactionTestCase
 
 from autenticacion.models import CorreoAutorizado
 from catalogos.models import Estatus, MedioRecepcion, UnidadAdministrativa
-from .models import FUS, Evidencia, Turnado, Bitacora
+from .models import FUS, Evidencia, Turnado, Bitacora, Notificacion, Actividad
 
 
 class BitacoraROL2Tests(APITestCase):
@@ -546,6 +549,115 @@ class FUSIDORTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
 
+class TurnarMultiplesDestinatariosTests(APITestCase):
+    """TurnarFUSView — Bloque N: turnar a varios destinatarios del mismo FUS
+    con el mismo medio no debe repetir la consulta a MedioRecepcion ni el
+    get_or_create de la Actividad de "vence FUS" una vez por destinatario."""
+
+    @classmethod
+    def setUpTestData(cls):
+        Estatus.objects.get_or_create(
+            clave='Registrado', defaults={'nombre': 'Registrado', 'tipoFlujo': 'PARTICULAR', 'orden': 1},
+        )
+        Estatus.objects.get_or_create(
+            clave='Recibido', defaults={'nombre': 'Recibido', 'tipoFlujo': 'TITULAR', 'orden': 1},
+        )
+        cls.medio = MedioRecepcion.objects.create(nombreMedio='Correo electrónico', paraTurnado=1)
+        cls.rol1 = User.objects.create_user(username='rol1@t.mx', email='rol1@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rol1@t.mx', nombre='Rol1', rol='ROL1', activo=1)
+        cls.dest1 = User.objects.create_user(username='dest1@t.mx', email='dest1@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='dest1@t.mx', nombre='Dest1', rol='ROL2', activo=1)
+        cls.dest2 = User.objects.create_user(username='dest2@t.mx', email='dest2@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='dest2@t.mx', nombre='Dest2', rol='ROL2', activo=1)
+
+        cls.fus = FUS.objects.create(
+            folio='ANAM/PARTICULAR/FUS/0400/2026', idSolicitanteInterno=cls.rol1,
+            descripcion='x', contexto='', estatusParticular_id='Registrado',
+            idUsuarioRegistra=cls.rol1.id,
+            fechaLimite=timezone.now() + timedelta(days=3),
+        )
+
+    def test_turnar_a_dos_destinatarios_mismo_medio(self):
+        self.client.force_authenticate(user=self.rol1)
+        resp = self.client.post(f'/api/fus/{self.fus.pk}/turnar/', {
+            'destinatarios': [
+                {'idDestinatario': self.dest1.id, 'idMedio': self.medio.id},
+                {'idDestinatario': self.dest2.id, 'idMedio': self.medio.id},
+            ],
+            'solicitudTexto': 'turnado de prueba',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        turnados = Turnado.objects.filter(idFus=self.fus, activo=1)
+        self.assertEqual(turnados.count(), 2)
+        self.assertEqual(set(turnados.values_list('idDestinatario_id', flat=True)), {self.dest1.id, self.dest2.id})
+
+        # Una sola Actividad "vence FUS" para el FUS, con ambos destinatarios
+        # como participantes — no una por destinatario.
+        actividades = Actividad.objects.filter(idFusRelacionado=self.fus, tipo='limite')
+        self.assertEqual(actividades.count(), 1)
+        self.assertEqual(
+            set(actividades.first().participantes.values_list('id', flat=True)),
+            {self.dest1.id, self.dest2.id},
+        )
+
+    def test_medio_recepcion_se_consulta_una_sola_vez_para_ambos_destinatarios(self):
+        from django.test.utils import CaptureQueriesContext
+        from django.db import connection
+
+        self.client.force_authenticate(user=self.rol1)
+        with CaptureQueriesContext(connection) as ctx:
+            resp = self.client.post(f'/api/fus/{self.fus.pk}/turnar/', {
+                'destinatarios': [
+                    {'idDestinatario': self.dest1.id, 'idMedio': self.medio.id},
+                    {'idDestinatario': self.dest2.id, 'idMedio': self.medio.id},
+                ],
+                'solicitudTexto': 'turnado de prueba',
+            }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        consultas_medio = [q for q in ctx.captured_queries if 'scs_cat_medios_recepcion' in q['sql']]
+        # SELECT del medio (una sola vez, cacheado por id) — no debe haber
+        # una segunda SELECT a MedioRecepcion para el segundo destinatario.
+        selects_medio = [q for q in consultas_medio if q['sql'].strip().upper().startswith('SELECT')]
+        self.assertEqual(len(selects_medio), 1, consultas_medio)
+
+
+class ComisionarFUSActividadTests(APITestCase):
+    """ComisionarFUSView — el comisionado asignado debe quedar como
+    participante de la Actividad "vence FUS" del calendario, igual que ya
+    pasa con el destinatario de un Turnado (TurnarMultiplesDestinatariosTests)
+    — sin esto, la temporalidad del FUS nunca aparecía en el calendario del
+    comisionado, solo en el de quien lo registró/turnó."""
+
+    @classmethod
+    def setUpTestData(cls):
+        Estatus.objects.get_or_create(
+            clave='Registrado', defaults={'nombre': 'Registrado', 'tipoFlujo': 'PARTICULAR', 'orden': 1},
+        )
+        cls.rol1 = User.objects.create_user(username='rol1@t.mx', email='rol1@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rol1@t.mx', nombre='Rol1', rol='ROL1', activo=1)
+        cls.comisionado = User.objects.create_user(username='comi@t.mx', email='comi@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='comi@t.mx', nombre='Comi', rol='COMISIONADO', activo=1)
+
+        cls.fus = FUS.objects.create(
+            folio='ANAM/PARTICULAR/FUS/0500/2026', idSolicitanteInterno=cls.rol1,
+            descripcion='x', contexto='', estatusParticular_id='Registrado',
+            idUsuarioRegistra=cls.rol1.id,
+            fechaLimite=timezone.now() + timedelta(days=3),
+        )
+
+    def test_comisionar_agrega_al_comisionado_como_participante(self):
+        self.client.force_authenticate(user=self.rol1)
+        resp = self.client.post(f'/api/fus/{self.fus.pk}/comisionar/', {
+            'comisionado_id': self.comisionado.id,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        actividad = Actividad.objects.get(idFusRelacionado=self.fus, tipo='limite', activo=1)
+        self.assertIn(self.comisionado.id, actividad.participantes.values_list('id', flat=True))
+
+
 class _FixtureRolesFUS(APITestCase):
     """Base con un FUS y un usuario por cada combinación autorizado/ajeno de
     los 4 roles que pueden llegar a DescargarEvidenciaView/FUSTrazabilidadView
@@ -854,3 +966,170 @@ class ValidacionPorPersonaTurnadoTests(APITestCase):
         self._atendido(self.mariana, self.t_mariana)
         resp = self._concluir_persona(self.lucia, self.t_mariana)
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class BusquedaFUSFulltextTests(APITransactionTestCase):
+    """FUSListCreateView.get(search=...) — migración 0033: MATCH()...AGAINST()
+    IN BOOLEAN MODE sobre FUS.descripcion/contexto, Evidencia.nombreArchivo/
+    comentarios y Turnado.solicitudTexto, con respaldo a icontains para
+    términos más cortos que innodb_ft_min_token_size.
+
+    APITransactionTestCase (no APITestCase): InnoDB solo refleja filas
+    nuevas en el índice FULLTEXT después de un COMMIT real — con
+    APITestCase (que envuelve cada test en una transacción que hace
+    rollback al final) MATCH() nunca ve los datos de setUp, aunque
+    icontains sí los vería vía MVCC dentro de esa misma transacción."""
+
+    def setUp(self):
+        Estatus.objects.get_or_create(
+            clave='Registrado', defaults={'nombre': 'Registrado', 'tipoFlujo': 'PARTICULAR', 'orden': 1},
+        )
+        Estatus.objects.get_or_create(
+            clave='Turnado', defaults={'nombre': 'Turnado', 'tipoFlujo': 'PARTICULAR', 'orden': 2},
+        )
+        Estatus.objects.get_or_create(
+            clave='Recibido', defaults={'nombre': 'Recibido', 'tipoFlujo': 'TITULAR', 'orden': 1},
+        )
+        self.medio = MedioRecepcion.objects.create(nombreMedio='Correo electrónico', paraTurnado=1)
+        self.rol1 = User.objects.create_user(username='rol1@t.mx', email='rol1@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rol1@t.mx', nombre='Rol1', rol='ROL1', activo=1)
+        self.rol2 = User.objects.create_user(username='rol2@t.mx', email='rol2@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rol2@t.mx', nombre='Rol2', rol='ROL2', activo=1)
+
+        self.fus_descripcion = FUS.objects.create(
+            folio='ANAM/PARTICULAR/FUS/0200/2026', idSolicitanteInterno=self.rol1,
+            descripcion='Solicitud sobre credenciales de acceso institucional', contexto='',
+            estatusParticular_id='Registrado', idUsuarioRegistra=self.rol1.id,
+        )
+        self.fus_evidencia = FUS.objects.create(
+            folio='ANAM/PARTICULAR/FUS/0201/2026', idSolicitanteInterno=self.rol1,
+            descripcion='Otro asunto sin relación', contexto='',
+            estatusParticular_id='Registrado', idUsuarioRegistra=self.rol1.id,
+        )
+        Evidencia.objects.create(
+            idFus=self.fus_evidencia, nombreArchivo='comprobante_pago.pdf',
+            comentarios='Incluye el recibo de pago correspondiente', activo=1,
+        )
+        self.fus_turnado = FUS.objects.create(
+            folio='ANAM/PARTICULAR/FUS/0202/2026', idSolicitanteInterno=self.rol1,
+            descripcion='Asunto distinto', contexto='',
+            estatusParticular_id='Turnado', idUsuarioRegistra=self.rol1.id,
+        )
+        Turnado.objects.create(
+            idFus=self.fus_turnado, idRemitente=self.rol1, idDestinatario=self.rol2,
+            idMedio=self.medio, estatusTitular_id='Recibido', activo=1,
+            solicitudTexto='Favor de atender la revisión aduanera solicitada',
+        )
+
+    def _buscar(self, termino):
+        self.client.force_authenticate(user=self.rol1)
+        resp = self.client.get('/api/fus/', {'search': termino})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        return {f['folio'] for f in resp.data['results']}
+
+    def test_encuentra_por_descripcion(self):
+        self.assertIn(self.fus_descripcion.folio, self._buscar('credenciales'))
+
+    def test_encuentra_por_evidencia(self):
+        self.assertIn(self.fus_evidencia.folio, self._buscar('comprobante'))
+
+    def test_encuentra_por_turnado(self):
+        self.assertIn(self.fus_turnado.folio, self._buscar('aduanera'))
+
+    def test_termino_corto_usa_respaldo_icontains(self):
+        # 'de' tiene 2 caracteres — más corto que innodb_ft_min_token_size,
+        # así que no debe usar MATCH() (no encontraría nada) sino icontains.
+        folios = self._buscar('de')
+        self.assertIn(self.fus_descripcion.folio, folios)
+
+    def test_termino_sin_coincidencias_no_falla(self):
+        self.assertEqual(self._buscar('xyznoexisteenningunlado'), set())
+
+    def test_caracteres_de_operador_booleano_no_rompen_la_busqueda(self):
+        # +, -, *, ", (, ) tienen significado especial en modo booleano de
+        # MySQL — deben limpiarse antes de armar el término, no llegar
+        # crudos a MATCH()...AGAINST() (que fallaría con sintaxis inválida).
+        folios = self._buscar('+credenciales* -"acceso"')
+        self.assertIn(self.fus_descripcion.folio, folios)
+
+
+class NotificarPorCorreoTests(APITestCase):
+    """notificar_por_correo() — Bloque L: con RQ_QUEUES configurado (Redis
+    disponible) encola el envío con reintento automático (django-rq); sin
+    Redis cae al hilo suelto de respaldo — mismo criterio condicional que
+    CHANNEL_LAYERS/CACHES en settings.py. No hay Redis real en este entorno
+    de pruebas, así que la ruta con cola se verifica mockeando
+    django_rq.get_queue en vez de correr un worker de verdad."""
+
+    @classmethod
+    def setUpTestData(cls):
+        Estatus.objects.get_or_create(
+            clave='Registrado', defaults={'nombre': 'Registrado', 'tipoFlujo': 'PARTICULAR', 'orden': 1},
+        )
+        cls.user = User.objects.create_user(username='dest@t.mx', email='dest@t.mx', password='x')
+        cls.otro_user = User.objects.create_user(username='dest2@t.mx', email='dest2@t.mx', password='x')
+
+    def _crear_notificacion(self):
+        return Notificacion.objects.create(
+            idDestinatario=self.user, fusFolio='', tipoEvento='ACTIVIDAD', mensaje='prueba',
+        )
+
+    def test_sin_rq_usa_hilo_de_respaldo(self):
+        from solicitudes.services.notificaciones import notificar_por_correo
+        notif = self._crear_notificacion()
+        with patch('solicitudes.services.notificaciones.threading.Thread') as MockThread:
+            with self.captureOnCommitCallbacks(execute=True):
+                notificar_por_correo(notif)
+            MockThread.assert_called_once()
+            _, kwargs = MockThread.call_args
+            # Se pasan ids en una lista (notificar_por_correo_lote), no el
+            # objeto ni un id suelto — ver _enviar_correos_lote().
+            self.assertEqual(kwargs['args'], ([notif.id],))
+
+    @override_settings(RQ_QUEUES={'default': {'URL': 'redis://localhost:6379/0'}})
+    def test_con_rq_encola_con_reintento(self):
+        from solicitudes.services.notificaciones import notificar_por_correo
+        notif = self._crear_notificacion()
+        mock_queue = MagicMock()
+        with patch('django_rq.get_queue', return_value=mock_queue):
+            with self.captureOnCommitCallbacks(execute=True):
+                notificar_por_correo(notif)
+        mock_queue.enqueue.assert_called_once()
+        args, kwargs = mock_queue.enqueue.call_args
+        self.assertEqual(args[1], [notif.id])
+        self.assertEqual(kwargs['retry'].max, 3)
+        self.assertEqual(kwargs['retry'].intervals, [10, 30, 60])
+
+    def test_lote_reutiliza_una_sola_consulta_al_fus(self):
+        # Bloque M: turnar (u otra acción) a varios destinatarios del mismo
+        # FUS debe resolver el FUS una sola vez para todo el lote, no una
+        # vez por destinatario.
+        from solicitudes.services import notificaciones as notif_mod
+
+        fus = FUS.objects.create(
+            folio='ANAM/PARTICULAR/FUS/0300/2026', idSolicitanteInterno=self.user,
+            descripcion='x', contexto='', estatusParticular_id='Registrado',
+            idUsuarioRegistra=self.user.id,
+        )
+        n1 = Notificacion.objects.create(
+            idDestinatario=self.user, fusFolio=fus.folio, tipoEvento='TURNADO', mensaje='a',
+        )
+        n2 = Notificacion.objects.create(
+            idDestinatario=self.otro_user, fusFolio=fus.folio, tipoEvento='TURNADO', mensaje='b',
+        )
+
+        # connections.close_all() también se mockea: _enviar_correos_lote lo
+        # llama en su finally (correcto en un hilo/worker real de
+        # producción), pero aquí se invoca en el mismo hilo/conexión del
+        # test — cerrarla de verdad rompería la transacción compartida que
+        # usa TestCase para los demás tests de esta clase.
+        with patch.object(
+            notif_mod, '_cargar_fus_para_correo', wraps=notif_mod._cargar_fus_para_correo,
+        ) as mock_cargar, patch.object(notif_mod, 'EmailMultiAlternatives') as MockEmail, \
+                patch.object(notif_mod.connections, 'close_all'), \
+                patch('solicitudes.views.fus.generar_pdf_fus', return_value=b'%PDF-'):
+            MockEmail.return_value = MagicMock()
+            notif_mod._enviar_correos_lote([n1.id, n2.id])
+
+        mock_cargar.assert_called_once_with(fus.folio)
+        self.assertEqual(MockEmail.call_count, 2)

@@ -35,8 +35,8 @@ class FUS(models.Model):
     fechaHora = models.DateTimeField(null=True, blank=True, db_column='fecha_hora')
     # descripcion/contexto tienen índice FULLTEXT en BD (migración 0033,
     # RunSQL — MySQL/InnoDB no tiene una clase de índice FULLTEXT de
-    # primera clase en el ORM). Aditivo: la búsqueda en views/fus.py sigue
-    # usando icontains, no MATCH()...AGAINST().
+    # primera clase en el ORM), usado por FUSListCreateView.get vía
+    # MATCH()...AGAINST() IN BOOLEAN MODE.
     descripcion = models.TextField()
     contexto = models.TextField()
     idMedioRecepcion = models.ForeignKey(
@@ -115,7 +115,8 @@ class Evidencia(models.Model):
         db_column='fus_id',
     )
     # nombreArchivo/comentarios tienen índice FULLTEXT en BD (migración
-    # 0033) — ver nota equivalente en FUS.descripcion.
+    # 0033), usado por FUSListCreateView.get — ver nota equivalente en
+    # FUS.descripcion.
     nombreArchivo = models.CharField(
         max_length=255, null=True, blank=True, db_column='nombre_archivo',
     )
@@ -184,8 +185,8 @@ class Turnado(models.Model):
         max_length=255, null=True, blank=True,
         db_column='medio_especificacion',
     )
-    # Índice FULLTEXT en BD (migración 0033) — ver nota equivalente en
-    # FUS.descripcion.
+    # Índice FULLTEXT en BD (migración 0033), usado por
+    # FUSListCreateView.get — ver nota equivalente en FUS.descripcion.
     solicitudTexto = models.TextField(
         null=True, blank=True, db_column='solicitud_texto',
     )
@@ -344,6 +345,13 @@ class Actividad(models.Model):
 
     class Meta:
         db_table = 'scs_tbl_actividades'
+        indexes = [
+            # ActividadListCreateView.get() filtra por fecha__year/fecha__month
+            # (el Calendario pide un mes a la vez) y por fecha exacta al crear
+            # (chequeo de conflicto de horario) — sin índice, ambos son escaneo
+            # completo de la tabla.
+            models.Index(fields=['fecha'], name='idx_actividad_fecha'),
+        ]
 
     TIPO_CHOICES = [
         ('reunion', 'Reunión'),

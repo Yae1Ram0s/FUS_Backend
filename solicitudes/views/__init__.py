@@ -39,6 +39,7 @@ from .reportes import (
 )
 from .reportes_titular import (
     ReporteTitularExportarExcelView,
+    ReporteTitularExportarPDFView,
     ReporteTitularOpcionesView,
     ReporteTitularResumenView,
 )
@@ -91,6 +92,7 @@ __all__ = [
     'ReporteOpcionesView',
     'ReporteResumenView',
     'ReporteTitularExportarExcelView',
+    'ReporteTitularExportarPDFView',
     'ReporteTitularOpcionesView',
     'ReporteTitularResumenView',
     'RechazarPersonaTurnadoView',

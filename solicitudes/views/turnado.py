@@ -19,7 +19,7 @@ from ..serializers import (
 )
 from ..utils import resolver_nombre, _equipo_particular_de, es_marcador_atendido_o_concluido
 from ..helpers import emails_de_turnados, mapa_correos_autorizados
-from ..services import notificar_por_correo, push_notificacion
+from ..services import notificar_por_correo, notificar_por_correo_lote, push_notificacion
 from .comisionado import _quien_comisiono
 from .helpers import (
     _log,
@@ -68,11 +68,33 @@ class TurnarFUSView(APIView):
         remitente_auth = CorreoAutorizado.objects.filter(email=user.email, activo=1).first()
         nombre_remitente = remitente_auth.nombre if remitente_auth else (user.first_name or user.email)
 
+        # Se acumulan y se encolan juntas al final del loop (ver
+        # notificar_por_correo_lote) — turnar a varios destinatarios del
+        # mismo FUS comparte una sola consulta al FUS en el envío de correo,
+        # en vez de repetirla una vez por destinatario (Hallazgo 3.2).
+        notificaciones_turnado = []
+        # `dest['idMedio']` es, en el flujo normal del frontend (un solo
+        # selector de medio para todos los destinatarios), el mismo valor en
+        # cada iteración — se cachea por id en vez de asumirlo (el API sí
+        # admite un medio distinto por destinatario), así que en el caso
+        # común es una sola consulta a MedioRecepcion para todo el turnado
+        # en vez de una por destinatario (Hallazgo 1.4).
+        medios_cache = {}
+        # La Actividad de "vence FUS" es una sola por FUS, no una por
+        # destinatario — se resuelve la primera vez que hace falta (el
+        # primer destinatario que de verdad se turna, no uno ya turnado que
+        # se salta abajo) y se reusa para los participantes siguientes, en
+        # vez de repetir el get_or_create en cada vuelta (Hallazgo 1.4).
+        actividad_limite = None
         for dest in destinatarios:
             dest_user = get_object_or_404(User, pk=dest['idDestinatario'])
             if _rol(dest_user) != 'ROL2':
                 return Response({'detail': 'Destinatario inválido: debe ser un usuario ROL2 activo.'}, status=400)
-            medio     = get_object_or_404(MedioRecepcion, pk=dest['idMedio'])
+            medio_id = dest['idMedio']
+            medio = medios_cache.get(medio_id)
+            if medio is None:
+                medio = get_object_or_404(MedioRecepcion, pk=medio_id)
+                medios_cache[medio_id] = medio
 
             ya_turnado = Turnado.objects.filter(idFus=fus, idDestinatario=dest_user, activo=1).exclude(estatusTitular_id='Concluido').exists()
             if ya_turnado:
@@ -89,21 +111,22 @@ class TurnarFUSView(APIView):
                 idUsuarioRegistra=user.id,
             )
             if fus.fechaLimite:
-                # Ver comentario equivalente en FUSListCreateView.post
-                # (views/fus.py): localtime() antes de partir en fecha/hora,
-                # o un límite de "hoy" puede quedar registrado un día antes o
-                # después en el calendario (México es UTC-6).
-                limite_local = timezone.localtime(fus.fechaLimite)
-                actividad_limite, _creada = Actividad.objects.get_or_create(
-                    idFusRelacionado=fus, tipo='limite', activo=1,
-                    defaults={
-                        'titulo': f"Vence FUS: {fus.folio}",
-                        'fecha': limite_local.date(),
-                        'horaInicio': limite_local.time(),
-                        'horaFin': limite_local.time(),
-                        'idCreador': user,
-                    },
-                )
+                if actividad_limite is None:
+                    # Ver comentario equivalente en FUSListCreateView.post
+                    # (views/fus.py): localtime() antes de partir en fecha/
+                    # hora, o un límite de "hoy" puede quedar registrado un
+                    # día antes o después en el calendario (México es UTC-6).
+                    limite_local = timezone.localtime(fus.fechaLimite)
+                    actividad_limite, _creada = Actividad.objects.get_or_create(
+                        idFusRelacionado=fus, tipo='limite', activo=1,
+                        defaults={
+                            'titulo': f"Vence FUS: {fus.folio}",
+                            'fecha': limite_local.date(),
+                            'horaInicio': limite_local.time(),
+                            'horaFin': limite_local.time(),
+                            'idCreador': user,
+                        },
+                    )
                 actividad_limite.participantes.add(dest_user)
 
             _notif = Notificacion.objects.create(
@@ -113,7 +136,9 @@ class TurnarFUSView(APIView):
                 mensaje=f"{nombre_remitente} te ha turnado el FUS {fus.folio}.",
             )
             push_notificacion(_notif)
-            notificar_por_correo(_notif)
+            notificaciones_turnado.append(_notif)
+
+        notificar_por_correo_lote(notificaciones_turnado)
 
         estado_ant = fus.estatusParticular_id
         fus.estatusParticular_id = 'Turnado'
@@ -490,6 +515,7 @@ class ConcluirTurnadoView(APIView):
             nombre_concluye = concluye_auth.nombre if concluye_auth else (user.first_name or user.email)
             destinatarios = {fus.idSolicitanteInterno} | set(_equipo_particular_de(fus.idSolicitanteInterno))
             destinatarios.discard(user)
+            _notifs = []
             for destinatario in destinatarios:
                 _notif = Notificacion.objects.create(
                     idDestinatario=destinatario,
@@ -498,7 +524,8 @@ class ConcluirTurnadoView(APIView):
                     mensaje=f"{nombre_concluye} ha concluido el FUS {fus.folio}.",
                 )
                 push_notificacion(_notif)
-                notificar_por_correo(_notif)
+                _notifs.append(_notif)
+            notificar_por_correo_lote(_notifs)
 
             _log(usuario=user.email, rol=rol, accion='ASIGNACION_ESTADO',
                  ip=ip, folio=fus.folio,
@@ -667,6 +694,7 @@ class ConcluirPersonaTurnadoView(APIView):
 
             destinatarios_fus = {fus.idSolicitanteInterno} | set(_equipo_particular_de(fus.idSolicitanteInterno))
             destinatarios_fus.discard(user)
+            _notifs_fus = []
             for destinatario in destinatarios_fus:
                 _notif_fus = Notificacion.objects.create(
                     idDestinatario=destinatario,
@@ -675,7 +703,8 @@ class ConcluirPersonaTurnadoView(APIView):
                     mensaje=f"El FUS {fus.folio} fue concluido — todas las personas turnadas atendieron su parte.",
                 )
                 push_notificacion(_notif_fus)
-                notificar_por_correo(_notif_fus)
+                _notifs_fus.append(_notif_fus)
+            notificar_por_correo_lote(_notifs_fus)
 
             _log(usuario=user.email, rol=rol, accion='ASIGNACION_ESTADO',
                  ip=ip, folio=fus.folio, estado_ant=est_ant_fus, estado_nuevo='Concluido')
@@ -870,6 +899,7 @@ class SeguimientoListCreateView(APIView):
                 )
                 destinatarios = {fus.idSolicitanteInterno} | set(_equipo_particular_de(fus.idSolicitanteInterno))
                 destinatarios.discard(user)
+                _notifs = []
                 for destinatario in destinatarios:
                     _notif = Notificacion.objects.create(
                         idDestinatario=destinatario,
@@ -878,7 +908,8 @@ class SeguimientoListCreateView(APIView):
                         mensaje=mensaje,
                     )
                     push_notificacion(_notif)
-                    notificar_por_correo(_notif)
+                    _notifs.append(_notif)
+                notificar_por_correo_lote(_notifs)
 
                 accion = 'REAPERTURA_FUS' if est_ant_turnado == 'Rechazado' else 'ASIGNACION_ESTADO'
                 _log(usuario=user.email, rol=rol, accion=accion,
@@ -897,6 +928,7 @@ class SeguimientoListCreateView(APIView):
             etiqueta = 'una nueva respuesta' if seg.descripcionActividad else 'una nueva acción'
             destinatarios = {fus.idSolicitanteInterno} | set(_equipo_particular_de(fus.idSolicitanteInterno))
             destinatarios.discard(user)
+            _notifs = []
             for destinatario in destinatarios:
                 _notif = Notificacion.objects.create(
                     idDestinatario=destinatario,
@@ -905,7 +937,8 @@ class SeguimientoListCreateView(APIView):
                     mensaje=f"{nombre_titular} registró {etiqueta} en el FUS {fus.folio}: \"{resumen}\"",
                 )
                 push_notificacion(_notif)
-                notificar_por_correo(_notif)
+                _notifs.append(_notif)
+            notificar_por_correo_lote(_notifs)
 
         _log(usuario=user.email, rol=rol, accion='REGISTRO_RESPUESTA',
              ip=ip, folio=fus.folio)

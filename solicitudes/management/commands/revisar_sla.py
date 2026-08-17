@@ -20,7 +20,7 @@ from django.core.management.base import BaseCommand
 from django.utils import timezone
 
 from solicitudes.models import FUS, Turnado, Notificacion
-from solicitudes.services import notificar_por_correo, push_notificacion
+from solicitudes.services import notificar_por_correo_lote, push_notificacion
 from solicitudes.utils import _equipo_particular_de
 
 
@@ -68,6 +68,11 @@ class Command(BaseCommand):
         candidatos = {f.id: f for f in list(candidatos_hoy) + list(candidatos_futuro)}.values()
 
         creadas = 0
+        # Se acumulan todas las notificaciones de la corrida y se encolan
+        # juntas al final — un solo trabajo de correo para todo el barrido
+        # (el comando corre periódicamente vía cron, sin urgencia de
+        # request-response) en vez de uno por cada FUS/destinatario.
+        _notifs_sla = []
         for fus in candidatos:
             ya_notificado = Notificacion.objects.filter(
                 fusFolio=fus.folio,
@@ -98,7 +103,8 @@ class Command(BaseCommand):
                     mensaje=mensaje,
                 )
                 push_notificacion(notif)
-                notificar_por_correo(notif)
+                _notifs_sla.append(notif)
                 creadas += 1
 
+        notificar_por_correo_lote(_notifs_sla)
         self.stdout.write(self.style.SUCCESS(f'{creadas} notificaciones de SLA creadas.'))

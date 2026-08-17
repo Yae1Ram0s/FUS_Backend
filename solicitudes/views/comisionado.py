@@ -9,7 +9,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
 from autenticacion.models import CorreoAutorizado
-from ..models import FUS, Bitacora, Notificacion, SeguimientoRespuesta
+from ..models import FUS, Actividad, Bitacora, Notificacion, SeguimientoRespuesta
 from ..serializers import (
     FUSSerializer, SeguimientoRespuestaSerializer, SeguimientoComisionadoCreateSerializer,
     ComisionarFUSSerializer, AtendidoFUSSerializer, ConcluirAsuntoSerializer, RechazarSolicitudSerializer,
@@ -19,7 +19,7 @@ from ..permissions import (
     EsRol1oRol2, EsRol1oTurnadoDestinatario, EsRol1DuenoDelFUS,
     EsComisionado, EsComisionadoAsignado, PuedeVerSeguimientoComisionado,
 )
-from ..services import notificar_por_correo, push_notificacion
+from ..services import notificar_por_correo, notificar_por_correo_lote, push_notificacion
 from ..utils import _equipo_particular_de
 from ..helpers import emails_de_fus, mapa_correos_autorizados
 from .helpers import _rol, _log, _primer_error
@@ -104,6 +104,27 @@ class ComisionarFUSView(APIView):
                 turnado.estatusTitular_id = 'En_seguimiento'
                 turnado.idUsuarioModifica = user.id
                 turnado.save()
+
+            if fus.fechaLimite:
+                # Mismo criterio que TurnarFUSView (turnado.py): el
+                # comisionado se suma como participante del recordatorio
+                # "Vence FUS" del calendario — sin esto, la temporalidad del
+                # FUS (fecha límite, vencido/por vencer) solo la veía quien lo
+                # registró/turnó, nunca el comisionado que de verdad lo
+                # atiende. get_or_create reutiliza la Actividad si ya existía
+                # (creada al registrar o al turnar el FUS).
+                limite_local = timezone.localtime(fus.fechaLimite)
+                actividad_limite, _creada = Actividad.objects.get_or_create(
+                    idFusRelacionado=fus, tipo='limite', activo=1,
+                    defaults={
+                        'titulo': f"Vence FUS: {fus.folio}",
+                        'fecha': limite_local.date(),
+                        'horaInicio': limite_local.time(),
+                        'horaFin': limite_local.time(),
+                        'idCreador': user,
+                    },
+                )
+                actividad_limite.participantes.add(comisionado)
 
             _log(usuario=user.email, rol=rol, accion='ASIGNACION_COMISIONADO',
                  ip=ip, folio=fus.folio, estado_ant=est_ant, estado_nuevo='En_seguimiento')
@@ -226,7 +247,7 @@ class SeguimientoComisionadoListCreateView(APIView):
 
         for notif in notificaciones:
             push_notificacion(notif)
-            notificar_por_correo(notif)
+        notificar_por_correo_lote(notificaciones)
 
         return Response(SeguimientoRespuestaSerializer(seg).data, status=201)
 
@@ -290,7 +311,7 @@ class AtendidoFUSView(APIView):
 
         for notif in notificaciones:
             push_notificacion(notif)
-            notificar_por_correo(notif)
+        notificar_por_correo_lote(notificaciones)
 
         return Response(FUSSerializer(fus).data)
 
@@ -357,7 +378,7 @@ class ConcluirAsuntoView(APIView):
 
         for notif in notificaciones:
             push_notificacion(notif)
-            notificar_por_correo(notif)
+        notificar_por_correo_lote(notificaciones)
 
         return Response(FUSSerializer(fus).data)
 
@@ -438,6 +459,6 @@ class RechazarSolicitudView(APIView):
 
         for notif in notificaciones:
             push_notificacion(notif)
-            notificar_por_correo(notif)
+        notificar_por_correo_lote(notificaciones)
 
         return Response(FUSSerializer(fus).data)

@@ -29,6 +29,8 @@ from .reportes import (
     PALETA_HEX, VERDE_INSTITUCIONAL, LOGO_PATH,
     _etiqueta_campo, _fecha_inicio_fin, _periodo_anterior, _etiqueta_periodo,
     _delta_pct, CAMPOS_COMPARABLES, _CAMPOS_PORCENTAJE, _FORMATO_PORCENTAJE,
+    _hex_color, _pdf_grafica, _pdf_membrete, _pdf_construir_numbered_canvas,
+    _pdf_tabla_ejecutiva,
 )
 
 SECCIONES_TITULAR = {
@@ -55,9 +57,9 @@ def _aplicar_filtros_titular(qs, params):
     inicio, fin = _fecha_inicio_fin(params)
     qs = qs.filter(fechaRegistro__range=(inicio, fin))
     if params.get('estatus'):
-        qs = qs.filter(estatusTitular_id=params['estatus'])
+        qs = qs.filter(estatusTitular_id__in=[x for x in params['estatus'].split(',') if x])
     if params.get('prioridad'):
-        qs = qs.filter(idFus__prioridad=params['prioridad'])
+        qs = qs.filter(idFus__prioridad__in=[x for x in params['prioridad'].split(',') if x])
     return qs.order_by('fechaRegistro'), inicio, fin
 
 
@@ -196,7 +198,10 @@ class ReporteTitularOpcionesView(APIView):
 
     def get(self, request):
         _queryset_titular(request.user)
-        return Response({'estados': ESTADOS_TITULAR})
+        return Response({
+            'estados': [{'id': x, 'nombre': x.replace('_', ' ')} for x in ESTADOS_TITULAR],
+            'prioridades': [{'id': x, 'nombre': x} for x in ('Alta', 'Media', 'Baja')],
+        })
 
 
 def _excel_grafica_titular(ws, titulo, n_filas):
@@ -350,4 +355,155 @@ class ReporteTitularExportarExcelView(APIView):
         contenido = salida.getvalue()
         response = HttpResponse(contenido, content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
         response['Content-Disposition'] = 'attachment; filename="reporte_titular.xlsx"'
+        return response
+
+
+def _pdf_grafica_titular(seccion, filas):
+    """Mismo criterio que _pdf_grafica de reportes.py (ROL1) — 'estados' y
+    'tiempos' comparten exactamente la misma forma de datos ahí (nombre/
+    cantidad/porcentaje y rango/cantidad), así que se reutiliza tal cual.
+    'evolucion' y 'prioridad' sí necesitan su propia versión: aquí la
+    evolución usa 'recibidos' (no 'registrados') y no existe un equivalente
+    de barra por 'nombre' en reportes.py (solo 'unidad'/'rango')."""
+    from reportlab.graphics.charts.barcharts import VerticalBarChart
+    from reportlab.graphics.charts.legends import Legend
+    from reportlab.graphics.charts.linecharts import HorizontalLineChart
+    from reportlab.graphics.shapes import Drawing
+
+    if not filas:
+        return None
+    paleta = [_hex_color(f'#{h}') for h in PALETA_HEX]
+
+    if seccion in ('estados', 'tiempos'):
+        return _pdf_grafica(seccion, filas)
+
+    if seccion == 'evolucion':
+        d = Drawing(450, 185)
+        chart = HorizontalLineChart()
+        chart.x, chart.y = 35, 30
+        chart.width, chart.height = 300, 135
+        chart.data = [
+            [f['recibidos'] for f in filas],
+            [f['concluidos'] for f in filas],
+            [f['vencidos'] for f in filas],
+        ]
+        chart.categoryAxis.categoryNames = [f['periodo'] for f in filas]
+        chart.categoryAxis.labels.fontSize = 6.5
+        chart.categoryAxis.labels.angle = 30
+        chart.valueAxis.valueMin = 0
+        if max((v for fila in chart.data for v in fila), default=0) == 0:
+            chart.valueAxis.valueMax = 1
+        etiquetas = ['Recibidos', 'Concluidos', 'Vencidos']
+        for i in range(3):
+            chart.lines[i].strokeColor = paleta[i]
+            chart.lines[i].strokeWidth = 2
+        d.add(chart)
+        leyenda = Legend()
+        leyenda.x, leyenda.y = 355, 145
+        leyenda.fontSize = 7
+        leyenda.colorNamePairs = list(zip(paleta[:3], etiquetas))
+        d.add(leyenda)
+        return d
+
+    if seccion == 'prioridad':
+        d = Drawing(450, 185)
+        chart = VerticalBarChart()
+        chart.x, chart.y = 40, 40
+        chart.width, chart.height = 380, 130
+        chart.data = [[f['cantidad'] for f in filas]]
+        chart.categoryAxis.categoryNames = [f['nombre'] for f in filas]
+        chart.categoryAxis.labels.fontSize = 7.5
+        chart.valueAxis.valueMin = 0
+        if max((v for fila in chart.data for v in fila), default=0) == 0:
+            chart.valueAxis.valueMax = 1
+        chart.bars[0].fillColor = paleta[0]
+        d.add(chart)
+        return d
+
+    return None
+
+
+class ReporteTitularExportarPDFView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib.styles import ParagraphStyle
+        from reportlab.lib.units import cm
+        from reportlab.platypus import HRFlowable, KeepTogether, Paragraph, SimpleDocTemplate, Spacer
+
+        datos = _datos_titular(request)
+
+        st_titulo = ParagraphStyle('rep_titulo', fontName='Helvetica-Bold', fontSize=19, leading=23, textColor=_hex_color('#' + VERDE_INSTITUCIONAL), spaceAfter=8)
+        st_subtitulo = ParagraphStyle('rep_subtitulo', fontName='Helvetica', fontSize=9.5, leading=13, textColor=colors.HexColor('#555555'), spaceAfter=2)
+        st_seccion = ParagraphStyle('rep_seccion', fontName='Helvetica-Bold', fontSize=12.5, textColor=colors.white, backColor=_hex_color('#' + VERDE_INSTITUCIONAL), leftIndent=0, spaceBefore=0)
+        st_celda = ParagraphStyle('rep_celda', fontName='Helvetica', fontSize=7.5, textColor=colors.HexColor('#1a2f28'), leading=9.5)
+        st_celda_header = ParagraphStyle('rep_celda_header', parent=st_celda, fontName='Helvetica-Bold', textColor=colors.white)
+        st_vacio = ParagraphStyle('rep_vacio', fontName='Helvetica-Oblique', fontSize=8.5, textColor=colors.HexColor('#7a7a7a'))
+
+        ancho_util = letter[0] - 4 * cm  # 2cm de margen a cada lado, igual que el PDF de ROL1
+
+        nombre_titular = resolver_nombre(request.user)
+        filtros_aplicados = [
+            f"{etiqueta}: {request.query_params.get(clave)}"
+            for clave, etiqueta in [('estatus', 'Estado'), ('prioridad', 'Prioridad')]
+            if request.query_params.get(clave)
+        ]
+
+        elementos = [
+            Paragraph('Reporte de turnados — Titular', st_titulo),
+            Paragraph('Inteligencia operativa — Sistema de Control de Solicitudes', st_subtitulo),
+            Spacer(1, 6),
+            HRFlowable(width='100%', thickness=1.4, color=_hex_color('#' + VERDE_INSTITUCIONAL), spaceAfter=8),
+            Paragraph(f"<b>Titular:</b> {nombre_titular}", st_subtitulo),
+            Paragraph(f"<b>Periodo:</b> {datos['periodo']['inicio']} a {datos['periodo']['fin']}", st_subtitulo),
+        ]
+        if filtros_aplicados:
+            elementos.append(Paragraph(f"<b>Filtros aplicados:</b> {' · '.join(filtros_aplicados)}", st_subtitulo))
+        elementos.append(Spacer(1, 16))
+
+        contenido = {
+            'resumen': datos['resumen'], 'evolucion': datos['evolucion'],
+            'estados': datos['estados'], 'prioridad': datos['prioridad'],
+            'tiempos': datos['tiempos'], 'detalle': datos['detalle'][:150],
+        }
+        for seccion in ('resumen', 'evolucion', 'estados', 'prioridad', 'tiempos', 'detalle'):
+            filas = contenido[seccion]
+            grafica = _pdf_grafica_titular(seccion, filas) if not isinstance(filas, dict) else None
+
+            # Encabezado (+ gráfica, si tiene) siempre juntos, igual que en el
+            # PDF de ROL1 — sin esto un encabezado puede quedar solo al fondo
+            # de una página con su contenido empujado a la siguiente.
+            bloque_encabezado = [Paragraph(f"&nbsp;{SECCIONES_TITULAR[seccion]}", st_seccion), Spacer(1, 10)]
+            if grafica is not None:
+                bloque_encabezado.extend([grafica, Spacer(1, 8)])
+            elementos.append(KeepTogether(bloque_encabezado))
+
+            if isinstance(filas, dict):
+                tabla = [['Indicador', 'Valor']] + [[_etiqueta_campo(k), v] for k, v in filas.items()]
+            elif filas:
+                tabla = [[_etiqueta_campo(k) for k in filas[0]]] + [list(x.values()) for x in filas]
+            else:
+                tabla = None
+            if tabla:
+                elementos.append(_pdf_tabla_ejecutiva(tabla, st_celda, st_celda_header, ancho_util))
+            else:
+                elementos.append(Paragraph('Sin información para los filtros seleccionados.', st_vacio))
+            elementos.append(Spacer(1, 18))
+
+        salida = BytesIO()
+        doc = SimpleDocTemplate(
+            salida, pagesize=letter,
+            leftMargin=2 * cm, rightMargin=2 * cm, topMargin=3.3 * cm, bottomMargin=4 * cm,
+            title='Reporte de turnados — Titular', author='Sistema de Control de Solicitudes',
+        )
+        doc.build(
+            elementos,
+            onFirstPage=_pdf_membrete, onLaterPages=_pdf_membrete,
+            canvasmaker=_pdf_construir_numbered_canvas(),
+        )
+        contenido_bytes = salida.getvalue()
+        response = HttpResponse(contenido_bytes, content_type='application/pdf')
+        response['Content-Disposition'] = 'attachment; filename="reporte_titular.pdf"'
         return response

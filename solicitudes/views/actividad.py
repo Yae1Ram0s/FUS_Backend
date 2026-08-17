@@ -7,7 +7,7 @@ from rest_framework.permissions import IsAuthenticated
 
 from ..models import Actividad, FUS, Notificacion
 from ..serializers import ActividadSerializer
-from ..services import notificar_por_correo, push_notificacion
+from ..services import notificar_por_correo_lote, push_notificacion
 from .helpers import _puede_ver_fus
 
 
@@ -63,13 +63,15 @@ class ActividadListCreateView(APIView):
         )
         if participantes_ids:
             actividad.participantes.set(participantes_ids)
+            _notifs = []
             for uid in participantes_ids:
                 notif = Notificacion.objects.create(
                     idDestinatario_id=uid, fusFolio=actividad.idFusRelacionado.folio if actividad.idFusRelacionado else '',
                     tipoEvento='ACTIVIDAD', mensaje=f"Fuiste invitado a '{actividad.titulo}' el {actividad.fecha}.",
                 )
                 push_notificacion(notif)
-                notificar_por_correo(notif)
+                _notifs.append(notif)
+            notificar_por_correo_lote(_notifs)
         return Response(ActividadSerializer(actividad).data, status=201)
 
 
@@ -112,6 +114,7 @@ class ActividadDetailView(APIView):
             anteriores = set(actividad.participantes.values_list('id', flat=True))
             actividad.participantes.set(participantes_nuevos)
             agregados = {int(uid) for uid in participantes_nuevos} - anteriores
+            _notifs = []
             for uid in agregados:
                 notif = Notificacion.objects.create(
                     idDestinatario_id=uid,
@@ -119,7 +122,8 @@ class ActividadDetailView(APIView):
                     tipoEvento='ACTIVIDAD', mensaje=f"Fuiste invitado a '{actividad.titulo}' el {actividad.fecha}.",
                 )
                 push_notificacion(notif)
-                notificar_por_correo(notif)
+                _notifs.append(notif)
+            notificar_por_correo_lote(_notifs)
 
         return Response(ActividadSerializer(actividad).data)
 

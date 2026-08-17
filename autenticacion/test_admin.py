@@ -108,6 +108,19 @@ class AdminAPITests(APITestCase):
         for secret in ('secret_key', 'password', 'database_url', 'email_host_password'):
             self.assertNotIn(secret, body)
 
+    def test_salud_explica_advertencia_websocket_en_memoria(self):
+        self.auth(self.admin)
+        response = self.client.get('/api/auth/admin/salud/?forzar=true')
+        self.assertEqual(response.status_code, 200)
+        websocket = response.data['websocket']
+        if websocket['backend'] == 'InMemoryChannelLayer':
+            self.assertFalse(websocket['configurado'])
+            self.assertEqual(websocket['codigo'], 'WS_MEMORIA_LOCAL')
+            self.assertIn('diagnostico', websocket)
+            self.assertIn('impacto', websocket)
+            self.assertIn('recomendacion', websocket)
+            self.assertGreater(len(websocket['comprobaciones']), 0)
+
     def test_metricas_admin_reconcilian_y_no_exponen_secretos(self):
         self.auth(self.admin)
         response = self.client.get('/api/auth/admin/metricas/?dias=30')
@@ -127,6 +140,33 @@ class AdminAPITests(APITestCase):
         response = self.client.post('/api/auth/login/', {'email': self.admin.email, 'password': 'Admin2026!Seguro'}, format='json')
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.data['user']['requiereCambioContrasena'])
+
+    def test_usuario_cambia_contrasena_temporal_antes_de_entrar(self):
+        sec, _ = SeguridadUsuario.objects.get_or_create(usuario=self.admin)
+        sec.requiereCambioContrasena = True
+        sec.save()
+        self.client.credentials()
+        login = self.client.post('/api/auth/login/', {
+            'email': self.admin.email,
+            'password': 'Admin2026!Seguro',
+        }, format='json')
+        self.assertEqual(login.status_code, 200)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {login.data['access']}")
+        bloqueado = self.client.get('/api/auth/admin/resumen/')
+        self.assertEqual(bloqueado.status_code, 401)
+        response = self.client.post('/api/auth/cambiar-contrasena-obligatoria/', {
+            'passwordActual': 'Admin2026!Seguro',
+            'passwordNueva': 'Nueva2026!Segura',
+        }, format='json')
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data['requiereCambioContrasena'])
+        self.assertIn('access', response.data)
+        self.admin.refresh_from_db()
+        self.assertTrue(self.admin.check_password('Nueva2026!Segura'))
+        self.assertFalse(SeguridadUsuario.objects.get(usuario=self.admin).requiereCambioContrasena)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {response.data['access']}")
+        permitido = self.client.get('/api/auth/admin/resumen/')
+        self.assertEqual(permitido.status_code, 200)
 
     def test_supervision_otp_no_expone_codigo(self):
         CodigoOTP.objects.create(

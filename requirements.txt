@@ -22,6 +22,14 @@ channels-redis==4.3.0
 # ejecución, mismo criterio que channels-redis arriba.
 django-redis==7.0.0
 
+# Cola de tareas real para notificaciones (correo + PDF adjunto), sobre el
+# mismo Redis de arriba — reemplaza los threading.Thread sueltos cuando
+# REDIS_URL está definido (ver services/notificaciones.py; sin Redis se usa
+# el hilo suelto de respaldo, sin cambios). rq es dependencia directa de
+# django-rq, pero se fija aparte porque notificaciones.py importa rq.Retry.
+django-rq==4.1.1
+rq==2.10.0
+
 # Base de datos (MySQL) — driver 100% Python: no requiere compilador ni
 # librerías de MySQL instaladas en el sistema (a diferencia de mysqlclient),
 # así que se instala igual en Windows (dev) y Linux (servidor institucional)
