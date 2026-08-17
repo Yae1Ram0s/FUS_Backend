@@ -658,6 +658,70 @@ class ComisionarFUSActividadTests(APITestCase):
         self.assertIn(self.comisionado.id, actividad.participantes.values_list('id', flat=True))
 
 
+class FiltroPendienteValidacionTests(APITestCase):
+    """FUSListCreateView — con un solo Titular turnado (sin comisionar),
+    marcar "Atendido" deja fus.estatusParticular en 'Atendido'
+    (MarcarTurnadoAtendidoView, turnado.py); es el propio Turnado el que pasa
+    a 'Pendiente_validacion'. La tarjeta ya lo muestra como "Por validar"
+    vía FUSSerializer.get_estatusVisual (pasa el estatus del único turnado
+    activo) — el filtro ?estatusParticular=Pendiente_validacion debe
+    encontrar ese mismo FUS, no solo los que ya llegaron a
+    'Pendiente_validacion' a nivel FUS (flujo de comisionado)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        Estatus.objects.get_or_create(
+            clave='Registrado', defaults={'nombre': 'Registrado', 'tipoFlujo': 'PARTICULAR', 'orden': 1},
+        )
+        cls.medio = MedioRecepcion.objects.create(nombreMedio='Correo electrónico', paraTurnado=1)
+        cls.rol1 = User.objects.create_user(username='rol1@t.mx', email='rol1@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rol1@t.mx', nombre='Rol1', rol='ROL1', activo=1)
+        cls.dest = User.objects.create_user(username='dest@t.mx', email='dest@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='dest@t.mx', nombre='Dest', rol='ROL2', activo=1)
+
+        cls.fus = FUS.objects.create(
+            folio='ANAM/PARTICULAR/FUS/0600/2026', idSolicitanteInterno=cls.rol1,
+            descripcion='x', contexto='', estatusParticular_id='Atendido',
+            idUsuarioRegistra=cls.rol1.id,
+        )
+        Turnado.objects.create(
+            idFus=cls.fus, idRemitente=cls.rol1, idDestinatario=cls.dest,
+            idMedio=cls.medio, estatusTitular_id='Pendiente_validacion', activo=1,
+        )
+
+    def test_filtro_por_validar_encuentra_fus_con_un_solo_turnado(self):
+        self.client.force_authenticate(user=self.rol1)
+        resp = self.client.get('/api/fus/', {'estatusParticular': 'Pendiente_validacion'})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        folios = {item['folio'] for item in resp.data['results']}
+        self.assertIn(self.fus.folio, folios)
+
+    def test_filtro_por_validar_no_incluye_fus_con_varios_turnados_atendido(self):
+        # Con dos personas turnadas, "Atendido" a nivel FUS no implica que
+        # AMBAS ya estén listas para validación — solo una lo está aquí, así
+        # que no debe colarse con la misma lógica de "un solo turnado".
+        dest2 = User.objects.create_user(username='dest2@t.mx', email='dest2@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='dest2@t.mx', nombre='Dest2', rol='ROL2', activo=1)
+        fus2 = FUS.objects.create(
+            folio='ANAM/PARTICULAR/FUS/0601/2026', idSolicitanteInterno=self.rol1,
+            descripcion='x', contexto='', estatusParticular_id='Atendido',
+            idUsuarioRegistra=self.rol1.id,
+        )
+        Turnado.objects.create(
+            idFus=fus2, idRemitente=self.rol1, idDestinatario=self.dest,
+            idMedio=self.medio, estatusTitular_id='Pendiente_validacion', activo=1,
+        )
+        Turnado.objects.create(
+            idFus=fus2, idRemitente=self.rol1, idDestinatario=dest2,
+            idMedio=self.medio, estatusTitular_id='En_seguimiento', activo=1,
+        )
+        self.client.force_authenticate(user=self.rol1)
+        resp = self.client.get('/api/fus/', {'estatusParticular': 'Pendiente_validacion'})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        folios = {item['folio'] for item in resp.data['results']}
+        self.assertNotIn(fus2.folio, folios)
+
+
 class _FixtureRolesFUS(APITestCase):
     """Base con un FUS y un usuario por cada combinación autorizado/ajeno de
     los 4 roles que pueden llegar a DescargarEvidenciaView/FUSTrazabilidadView

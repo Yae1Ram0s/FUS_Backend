@@ -3,7 +3,7 @@ import re
 
 from django.conf import settings
 from django.contrib.auth.models import User
-from django.db.models import Q, FloatField
+from django.db.models import Count, Q, FloatField
 from django.db.models.expressions import RawSQL
 from django.http import FileResponse, Http404
 from django.shortcuts import get_object_or_404
@@ -100,6 +100,27 @@ class FUSListCreateView(APIView):
                     q_estatus |= Q(
                         fechaLimite__gte=ahora, fechaLimite__lte=ahora + timedelta(hours=24),
                     ) & ~Q(estatusParticular_id='Concluido')
+                elif estatus == 'Pendiente_validacion':
+                    # Con un solo Titular turnado (sin comisionar), marcar
+                    # "Atendido" deja fus.estatusParticular en 'Atendido' —
+                    # el que de verdad pasa a 'Pendiente_validacion' es ese
+                    # turnado (MarcarTurnadoAtendidoView, turnado.py), porque
+                    # con varias personas "Atendido" no implica que todas ya
+                    # estén listas. La tarjeta ya refleja esto mostrando el
+                    # estatus del turnado cuando es el único activo
+                    # (FUSSerializer.get_estatusVisual) — este filtro necesita
+                    # el mismo criterio, o "Por validar" nunca encuentra esos
+                    # FUS aunque la tarjeta sí diga "Por validar".
+                    fus_un_turnado = (
+                        Turnado.objects.filter(activo=1)
+                        .values('idFus_id').annotate(n=Count('id')).filter(n=1)
+                        .values('idFus_id')
+                    )
+                    fus_un_turnado_pendiente = Turnado.objects.filter(
+                        activo=1, estatusTitular_id='Pendiente_validacion',
+                        idFus_id__in=fus_un_turnado,
+                    ).values('idFus_id')
+                    q_estatus |= Q(estatusParticular_id='Pendiente_validacion') | Q(pk__in=fus_un_turnado_pendiente)
                 else:
                     q_estatus |= Q(estatusParticular_id=estatus)
             qs = qs.filter(q_estatus)
