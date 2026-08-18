@@ -92,6 +92,11 @@ class Command(BaseCommand):
                 destinatarios |= set(_equipo_particular_de(fus.idSolicitanteInterno))
             if turnado_activo and turnado_activo.idDestinatario_id:
                 destinatarios.add(turnado_activo.idDestinatario)
+            # Sin esto, el comisionado (quien de verdad tiene que responder antes
+            # del límite) nunca se enteraba de que el FUS que atiende está por
+            # vencer — solo el dueño/equipo y el Titular que lo turnó.
+            if fus.idComisionado_id:
+                destinatarios.add(fus.idComisionado)
 
             mensaje = f"El FUS {fus.folio} está por vencer (límite: {fus.fechaLimite})."
 

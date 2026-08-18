@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import MedioRecepcion, PrioridadCriterio, Estatus, UnidadAdministrativa
+from .models import MedioRecepcion, Estatus, UnidadAdministrativa
 
 
 class UnidadAdministrativaSerializer(serializers.ModelSerializer):
@@ -12,12 +12,6 @@ class MedioRecepcionSerializer(serializers.ModelSerializer):
     class Meta:
         model  = MedioRecepcion
         fields = ['id', 'nombreMedio', 'paraTurnado']
-
-
-class PrioridadCriterioSerializer(serializers.ModelSerializer):
-    class Meta:
-        model  = PrioridadCriterio
-        fields = ['id', 'nivel', 'descripcionCriterio']
 
 
 class EstatusSerializer(serializers.ModelSerializer):

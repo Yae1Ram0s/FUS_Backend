@@ -450,3 +450,34 @@ class ReporteGuardado(models.Model):
 
     def __str__(self):
         return f"{self.nombre} ({self.formato})"
+
+
+class PushSubscription(models.Model):
+    """Suscripción Web Push (RFC 8030) de un dispositivo/navegador concreto
+    del usuario — puede tener varias a la vez (celular, PC, distintos
+    navegadores), cada una con su propio `endpoint`. Es lo que le permite al
+    backend empujar una notificación real del sistema operativo aun con la
+    pestaña/app cerrada (ver services/notificaciones.py), a diferencia del
+    aviso inmediato vía WebSocket, que solo funciona con la app abierta."""
+
+    class Meta:
+        db_table = 'scs_tbl_push_subscriptions'
+
+    idUsuario = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name='pushSubscriptions',
+        db_column='usuario_id',
+    )
+    # TextField (no CharField) a propósito: el endpoint que genera cada
+    # navegador/proveedor de push (FCM, Mozilla autopush, Apple Web Push)
+    # varía mucho de largo y algunos superan los ~255-767 bytes que MySQL
+    # permite indexar como UNIQUE con utf8mb4 sin configuración especial —
+    # la deduplicación por dispositivo se hace en PushSuscribirView
+    # (update_or_create), no con una restricción UNIQUE de base de datos.
+    endpoint = models.TextField()
+    p256dh = models.CharField(max_length=255)
+    auth = models.CharField(max_length=255)
+    userAgent = models.CharField(max_length=255, null=True, blank=True, db_column='user_agent')
+    fechaCreacion = models.DateTimeField(auto_now_add=True, db_column='fecha_creacion')
+
+    def __str__(self):
+        return f"PushSubscription(usuario={self.idUsuario_id})"

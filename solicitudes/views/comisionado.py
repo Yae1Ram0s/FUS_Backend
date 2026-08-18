@@ -234,6 +234,14 @@ class SeguimientoComisionadoListCreateView(APIView):
                     else ([fus.idSolicitanteInterno] if fus.idSolicitanteInterno_id else [])
                 )
                 destinatarios |= set(_equipo_particular_de(fus.idSolicitanteInterno))
+                # Si el FUS llegó al comisionado vía un Turnado (el Titular lo
+                # delegó en vez de responder directo), esa persona también se
+                # entera de que el comisionado ya empezó a atenderlo — antes
+                # solo se avisaba al lado del Particular (dueño del FUS + su
+                # unidad/equipo), dejando al Titular que delegó sin ninguna señal.
+                destinatarios |= {
+                    t.idDestinatario for t in fus.turnados.filter(activo=1) if t.idDestinatario_id
+                }
                 destinatarios.discard(user)
                 notificaciones = [
                     Notificacion.objects.create(
@@ -298,6 +306,13 @@ class AtendidoFUSView(APIView):
                 else ([fus.idSolicitanteInterno] if fus.idSolicitanteInterno_id else [])
             )
             destinatarios |= set(_equipo_particular_de(fus.idSolicitanteInterno))
+            # Mismo criterio que SeguimientoComisionadoListCreateView.post: si el
+            # FUS llegó al comisionado vía un Turnado, ese Titular también se
+            # entera de que ya se mandó a validación — antes solo se avisaba al
+            # lado del Particular.
+            destinatarios |= {
+                t.idDestinatario for t in fus.turnados.filter(activo=1) if t.idDestinatario_id
+            }
             destinatarios.discard(user)
             notificaciones = [
                 Notificacion.objects.create(

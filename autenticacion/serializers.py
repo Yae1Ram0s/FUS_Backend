@@ -21,7 +21,9 @@ class UsuarioROL2Serializer(serializers.ModelSerializer):
 
     class Meta:
         model  = User
-        fields = ['id', 'first_name', 'last_name', 'email', 'nombre', 'unidadAdministrativa']
+        # first_name/last_name no van aquí a propósito — ver nota equivalente
+        # en solicitudes/serializers.py:UserMiniSerializer.
+        fields = ['id', 'email', 'nombre', 'unidadAdministrativa']
 
     def get_nombre(self, obj):
         from solicitudes.utils import resolver_nombre

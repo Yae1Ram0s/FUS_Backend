@@ -52,6 +52,22 @@ if DEBUG:
 # link al folio del FUS en las notificaciones).
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:5173')
 
+# ── Web Push (VAPID) ──────────────────────────────────────────────────────────
+# Firman los envíos de Web Push (RFC 8292) — sin esto, push_notificacion()
+# (services/notificaciones.py) sigue avisando por WebSocket mientras la
+# pestaña esté abierta, pero nunca llega como notificación real del sistema
+# operativo (celular con la app cerrada, PC con el navegador cerrado). Genera
+# un par propio por ambiente con `python manage.py generar_vapid_keys`.
+# En DEBUG se usa un par fijo de desarrollo (generado una sola vez, solo para
+# que el flujo funcione en local sin configurar nada) — nunca usarlo en
+# producción, ahí SIEMPRE deben venir del entorno.
+VAPID_PUBLIC_KEY  = os.environ.get('VAPID_PUBLIC_KEY')
+VAPID_PRIVATE_KEY = os.environ.get('VAPID_PRIVATE_KEY')
+VAPID_CLAIM_EMAIL = os.environ.get('VAPID_CLAIM_EMAIL', 'soporte@anam.gob.mx')
+if not VAPID_PRIVATE_KEY and DEBUG:
+    VAPID_PUBLIC_KEY  = 'BAUgyWoDwOr0_PWgxzef6bT4W18_tsmuWm8LLgRLsUBVURkXK4F1wXTEky9iyT9tnlfM7RALRd26v2kF8hj8Ttw'
+    VAPID_PRIVATE_KEY = 'gx2MqiZ4S81qFSoKWgO3bu2MQgMqlnqnqd-ZHkTFA0Q'
+
 # ── Aplicaciones ────────────────────────────────────────────────────────────
 INSTALLED_APPS = [
     'daphne',
@@ -69,6 +85,7 @@ INSTALLED_APPS = [
     'autenticacion',
     'catalogos',
     'solicitudes',
+    'analitica',
 ]
 
 MIDDLEWARE = [

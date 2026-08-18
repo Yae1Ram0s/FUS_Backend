@@ -24,6 +24,11 @@ BITACORA_COLS_DEFAULT  = ['folio', 'nombre', 'usuario', 'fecha', 'estatus']
 # legible compartida por ambos exportadores (antes cada uno traía su propio
 # diccionario de ACCION_LABELS, duplicado e idéntico).
 ESTATUS_LABELS = {
+    # 'Atendido' (FUS.estatusParticular) se lee como si ya hubiera terminado —
+    # se muestra como "En seguimiento" en pantalla y en los exportables, mismo
+    # criterio que el frontend (Badge.jsx, Bitacora.jsx). El valor guardado
+    # (estadoAnterior/estadoNuevo) sigue siendo 'Atendido'.
+    'Atendido':             'En seguimiento',
     'En_seguimiento':       'En seguimiento',
     'Pendiente_validacion': 'Pendiente de validación',
 }

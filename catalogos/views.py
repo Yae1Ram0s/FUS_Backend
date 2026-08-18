@@ -2,8 +2,8 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
-from .models import MedioRecepcion, PrioridadCriterio, Estatus, UnidadAdministrativa
-from .serializers import MedioRecepcionSerializer, PrioridadCriterioSerializer, EstatusSerializer, UnidadAdministrativaSerializer
+from .models import MedioRecepcion, Estatus, UnidadAdministrativa
+from .serializers import MedioRecepcionSerializer, EstatusSerializer, UnidadAdministrativaSerializer
 
 
 class UnidadAdministrativaListView(APIView):
@@ -23,17 +23,6 @@ class MedioRecepcionListView(APIView):
         if para_turnado is not None:
             qs = qs.filter(paraTurnado=int(para_turnado))
         return Response(MedioRecepcionSerializer(qs, many=True).data)
-
-
-class PrioridadCriterioListView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        qs  = PrioridadCriterio.objects.filter(activo=1)
-        nivel = request.query_params.get('nivel')
-        if nivel:
-            qs = qs.filter(nivel=nivel)
-        return Response(PrioridadCriterioSerializer(qs, many=True).data)
 
 
 class EstatusListView(APIView):

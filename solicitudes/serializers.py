@@ -18,7 +18,12 @@ class UserMiniSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = User
-        fields = ['id', 'first_name', 'last_name', 'email', 'nombre', 'area']
+        # first_name/last_name no van aquí a propósito: son un espejo interno
+        # de CorreoAutorizado.nombre (ver autenticacion/views.py y
+        # admin_views.py, que los sincronizan al crear/editar), pero ningún
+        # consumidor del frontend los lee — todos usan `nombre` (abajo),
+        # que ya resuelve el mismo valor vía resolver_nombre().
+        fields = ['id', 'email', 'nombre', 'area']
 
     def get_nombre(self, obj):
         return resolver_nombre(obj, self.context.get('mapa_correos'))

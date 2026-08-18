@@ -11,7 +11,7 @@ from rest_framework.test import APITestCase, APITransactionTestCase
 
 from autenticacion.models import CorreoAutorizado
 from catalogos.models import Estatus, MedioRecepcion, UnidadAdministrativa
-from .models import FUS, Evidencia, Turnado, Bitacora, Notificacion, Actividad
+from .models import FUS, Evidencia, Turnado, Bitacora, Notificacion, Actividad, PushSubscription
 
 
 class BitacoraROL2Tests(APITestCase):
@@ -720,6 +720,217 @@ class FiltroPendienteValidacionTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         folios = {item['folio'] for item in resp.data['results']}
         self.assertNotIn(fus2.folio, folios)
+
+
+class SeguimientoComisionadoNotificaAlTitularTests(APITestCase):
+    """SeguimientoComisionadoListCreateView.post — cuando el FUS llegó al
+    comisionado vía un Turnado (el Titular lo delegó en vez de responder
+    directo), ese Titular debe enterarse de que el comisionado ya empezó a
+    atenderlo. Antes el cálculo de destinatarios solo consideraba el lado del
+    Particular (unidad del comisionado + equipo del dueño del FUS), dejando
+    al Titular sin ninguna notificación."""
+
+    @classmethod
+    def setUpTestData(cls):
+        Estatus.objects.get_or_create(
+            clave='Registrado', defaults={'nombre': 'Registrado', 'tipoFlujo': 'PARTICULAR', 'orden': 1},
+        )
+        cls.medio = MedioRecepcion.objects.create(nombreMedio='Correo electrónico', paraTurnado=1)
+        cls.rol1 = User.objects.create_user(username='rol1@t.mx', email='rol1@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rol1@t.mx', nombre='Rol1', rol='ROL1', activo=1)
+        cls.rol2 = User.objects.create_user(username='rol2@t.mx', email='rol2@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rol2@t.mx', nombre='Rol2', rol='ROL2', activo=1)
+        cls.comisionado = User.objects.create_user(username='comi@t.mx', email='comi@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='comi@t.mx', nombre='Comi', rol='COMISIONADO', activo=1)
+
+        cls.fus = FUS.objects.create(
+            folio='ANAM/PARTICULAR/FUS/0700/2026', idSolicitanteInterno=cls.rol1,
+            descripcion='x', contexto='', estatusParticular_id='En_seguimiento',
+            idUsuarioRegistra=cls.rol1.id, idComisionado=cls.comisionado,
+        )
+        Turnado.objects.create(
+            idFus=cls.fus, idRemitente=cls.rol1, idDestinatario=cls.rol2,
+            idMedio=cls.medio, estatusTitular_id='En_seguimiento', activo=1,
+        )
+
+    def test_titular_recibe_notificacion_al_primer_avance_del_comisionado(self):
+        self.client.force_authenticate(user=self.comisionado)
+        resp = self.client.post(f'/api/fus/{self.fus.pk}/seguimiento/', {
+            'tipo': 'avance', 'contenido': 'Ya empecé a revisar el expediente.',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+
+        self.assertTrue(
+            Notificacion.objects.filter(
+                idDestinatario=self.rol2, fusFolio=self.fus.folio, tipoEvento='SEGUIMIENTO_FINALIZADO',
+            ).exists()
+        )
+
+
+class AtendidoFUSNotificaAlTitularTests(APITestCase):
+    """AtendidoFUSView — mismo criterio que SeguimientoComisionadoNotificaAlTitularTests:
+    si el FUS llegó al comisionado vía un Turnado, ese Titular también debe
+    enterarse cuando se manda a validación del Particular."""
+
+    @classmethod
+    def setUpTestData(cls):
+        Estatus.objects.get_or_create(
+            clave='Registrado', defaults={'nombre': 'Registrado', 'tipoFlujo': 'PARTICULAR', 'orden': 1},
+        )
+        cls.medio = MedioRecepcion.objects.create(nombreMedio='Correo electrónico', paraTurnado=1)
+        cls.rol1 = User.objects.create_user(username='rol1b@t.mx', email='rol1b@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rol1b@t.mx', nombre='Rol1', rol='ROL1', activo=1)
+        cls.rol2 = User.objects.create_user(username='rol2b@t.mx', email='rol2b@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rol2b@t.mx', nombre='Rol2', rol='ROL2', activo=1)
+        cls.comisionado = User.objects.create_user(username='comib@t.mx', email='comib@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='comib@t.mx', nombre='Comi', rol='COMISIONADO', activo=1)
+
+        cls.fus = FUS.objects.create(
+            folio='ANAM/PARTICULAR/FUS/0701/2026', idSolicitanteInterno=cls.rol1,
+            descripcion='x', contexto='', estatusParticular_id='Atendido',
+            idUsuarioRegistra=cls.rol1.id, idComisionado=cls.comisionado,
+        )
+        Turnado.objects.create(
+            idFus=cls.fus, idRemitente=cls.rol1, idDestinatario=cls.rol2,
+            idMedio=cls.medio, estatusTitular_id='En_seguimiento', activo=1,
+        )
+
+    def test_titular_recibe_notificacion_al_enviar_a_validacion(self):
+        self.client.force_authenticate(user=self.rol1)
+        resp = self.client.post(f'/api/fus/{self.fus.pk}/atendido/', {}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        self.assertTrue(
+            Notificacion.objects.filter(
+                idDestinatario=self.rol2, fusFolio=self.fus.folio, tipoEvento='SEGUIMIENTO_FINALIZADO',
+            ).exists()
+        )
+
+
+class RevisarSlaNotificaComisionadoTests(APITestCase):
+    """revisar_sla (management command) — el comisionado asignado a un FUS
+    con fecha límite próxima a vencer debe recibir el aviso de SLA, no solo
+    el dueño del FUS y el Titular que lo turnó."""
+
+    def test_comisionado_recibe_aviso_de_sla(self):
+        from datetime import timedelta
+
+        from django.core.management import call_command
+        from django.utils import timezone
+
+        Estatus.objects.get_or_create(
+            clave='Registrado', defaults={'nombre': 'Registrado', 'tipoFlujo': 'PARTICULAR', 'orden': 1},
+        )
+        rol1 = User.objects.create_user(username='rol1c@t.mx', email='rol1c@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rol1c@t.mx', nombre='Rol1', rol='ROL1', activo=1)
+        comisionado = User.objects.create_user(username='comic@t.mx', email='comic@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='comic@t.mx', nombre='Comi', rol='COMISIONADO', activo=1)
+
+        fus = FUS.objects.create(
+            folio='ANAM/PARTICULAR/FUS/0702/2026', idSolicitanteInterno=rol1,
+            descripcion='x', contexto='', estatusParticular_id='En_seguimiento',
+            idUsuarioRegistra=rol1.id, idComisionado=comisionado,
+            fechaLimite=timezone.now() + timedelta(hours=1),
+        )
+
+        call_command('revisar_sla')
+
+        self.assertTrue(
+            Notificacion.objects.filter(
+                idDestinatario=comisionado, fusFolio=fus.folio, tipoEvento='SLA_POR_VENCER',
+            ).exists()
+        )
+
+
+class WebPushTests(APITestCase):
+    """Suscripción Web Push (PushSubscription) + envío real disparado desde
+    push_notificacion (services/notificaciones.py) — VapidPublicKeyView,
+    PushSuscribirView, PushDesuscribirView y _enviar_web_push."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(username='wp@t.mx', email='wp@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='wp@t.mx', nombre='WP', rol='ROL1', activo=1)
+
+    def test_vapid_public_key_no_requiere_autenticacion(self):
+        resp = self.client.get('/api/push/vapid-public-key/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn('publicKey', resp.data)
+
+    def test_suscribir_guarda_la_suscripcion(self):
+        self.client.force_authenticate(user=self.user)
+        resp = self.client.post('/api/push/suscribir/', {
+            'endpoint': 'https://fcm.googleapis.com/fcm/send/abc123',
+            'keys': {'p256dh': 'clave-p256dh', 'auth': 'clave-auth'},
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertTrue(
+            PushSubscription.objects.filter(
+                idUsuario=self.user, endpoint='https://fcm.googleapis.com/fcm/send/abc123',
+            ).exists()
+        )
+
+    def test_suscribir_incompleta_falla(self):
+        self.client.force_authenticate(user=self.user)
+        resp = self.client.post('/api/push/suscribir/', {'keys': {'p256dh': 'x', 'auth': 'y'}}, format='json')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_desuscribir_borra_la_suscripcion(self):
+        PushSubscription.objects.create(idUsuario=self.user, endpoint='https://x.test/1', p256dh='a', auth='b')
+        self.client.force_authenticate(user=self.user)
+        resp = self.client.post('/api/push/desuscribir/', {'endpoint': 'https://x.test/1'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(
+            PushSubscription.objects.filter(idUsuario=self.user, endpoint='https://x.test/1').exists()
+        )
+
+    @patch('pywebpush.webpush')
+    def test_enviar_web_push_llama_a_webpush_por_cada_suscripcion(self, mock_webpush):
+        from solicitudes.services import notificaciones as notif_mod
+
+        sub = PushSubscription.objects.create(
+            idUsuario=self.user, endpoint='https://fcm.googleapis.com/fcm/send/xyz',
+            p256dh='clave-p256dh', auth='clave-auth',
+        )
+        notif = Notificacion.objects.create(
+            idDestinatario=self.user, fusFolio='ANAM/PARTICULAR/FUS/0800/2026',
+            tipoEvento='RESPUESTA', mensaje='Prueba de push.',
+        )
+
+        # connections.close_all() se mockea por la misma razón que en
+        # NotificarPorCorreoTests: _enviar_web_push lo llama en su finally
+        # (correcto en un hilo/worker real), pero aquí corre en el mismo
+        # hilo/conexión del test — cerrarla de verdad rompería la
+        # transacción compartida que usa TestCase para los demás tests.
+        with patch.object(notif_mod.connections, 'close_all'):
+            notif_mod._enviar_web_push(notif.id)
+
+        mock_webpush.assert_called_once()
+        _, kwargs = mock_webpush.call_args
+        self.assertEqual(kwargs['subscription_info']['endpoint'], sub.endpoint)
+        self.assertEqual(kwargs['subscription_info']['keys'], {'p256dh': 'clave-p256dh', 'auth': 'clave-auth'})
+
+    @patch('pywebpush.webpush')
+    def test_enviar_web_push_borra_suscripcion_vencida(self, mock_webpush):
+        from pywebpush import WebPushException
+
+        from solicitudes.services import notificaciones as notif_mod
+
+        sub = PushSubscription.objects.create(
+            idUsuario=self.user, endpoint='https://fcm.googleapis.com/fcm/send/vencida',
+            p256dh='a', auth='b',
+        )
+        resp_410 = MagicMock(status_code=410)
+        mock_webpush.side_effect = WebPushException('gone', response=resp_410)
+
+        notif = Notificacion.objects.create(
+            idDestinatario=self.user, fusFolio='ANAM/PARTICULAR/FUS/0801/2026',
+            tipoEvento='RESPUESTA', mensaje='Prueba de push.',
+        )
+        with patch.object(notif_mod.connections, 'close_all'):
+            notif_mod._enviar_web_push(notif.id)
+
+        self.assertFalse(PushSubscription.objects.filter(pk=sub.pk).exists())
 
 
 class _FixtureRolesFUS(APITestCase):

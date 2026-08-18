@@ -199,7 +199,10 @@ class OTPFlowAPITests(APITestCase):
         resp = self.client.post('/api/auth/verificar-correo/', {'email': self.email})
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data['estado'], 'nuevo')
-        enviar_mock.assert_called_once()
+        # El paso de OTP por correo en verificar-correo está suspendido (ver
+        # docstring de VerificarCorreoView): ya no dispara el envío aquí,
+        # EstablecerContrasenaView lo hace opcional.
+        enviar_mock.assert_not_called()
 
     def test_establecer_contrasena_activa_usuario_sin_password(self):
         user = User(username=self.email, email=self.email)

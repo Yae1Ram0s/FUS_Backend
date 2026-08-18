@@ -1,7 +1,6 @@
 from django.utils import timezone
 
 from ..models import Turnado
-from ..helpers import _resolver_unidad_administrativa
 from ..utils import get_rol, log_bitacora, _propietario_fus
 
 # _rol/_log se mantienen como alias locales para no tocar cada llamada existente.

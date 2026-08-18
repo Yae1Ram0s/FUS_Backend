@@ -23,8 +23,3 @@ class UsuarioAdminCrearSerializer(serializers.Serializer):
 
 class RestablecerContrasenaSerializer(serializers.Serializer):
     metodo = serializers.ChoiceField(choices=('temporal', 'correo'))
-
-
-class CambiarContrasenaObligatoriaSerializer(serializers.Serializer):
-    passwordActual = serializers.CharField(write_only=True)
-    passwordNueva = serializers.CharField(write_only=True)

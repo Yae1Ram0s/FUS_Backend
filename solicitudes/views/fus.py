@@ -2,7 +2,6 @@ import os
 import re
 
 from django.conf import settings
-from django.contrib.auth.models import User
 from django.db.models import Count, Q, FloatField
 from django.db.models.expressions import RawSQL
 from django.http import FileResponse, Http404
@@ -18,7 +17,7 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from autenticacion.models import CorreoAutorizado
 from catalogos.models import MedioRecepcion
 from ..models import FUS, Evidencia, Turnado, Actividad, SeguimientoRespuesta
-from ..serializers import FUSSerializer, TurnadoActividadSerializer
+from ..serializers import FUSSerializer
 from ..services import generar_folio, guardar_evidencias, eliminar_evidencias
 from ..utils import resolver_nombre
 from ..helpers import _resolver_unidad_administrativa, emails_de_fus, mapa_correos_autorizados
@@ -556,7 +555,7 @@ def generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL1', turnado_id=No
         SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
         HRFlowable, Image as RLImage, PageBreak, KeepTogether,
     )
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.styles import ParagraphStyle
     from reportlab.lib import colors
     from reportlab.lib.units import cm
     import io
@@ -590,8 +589,6 @@ def generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL1', turnado_id=No
     AMARILLO = colors.HexColor("#FFFD78")  # antes '#FFFF00' — mismo ámbar que usa el resto del sistema, menos intenso
     CLARO    = colors.white
     BORDE    = colors.black
-
-    styles = getSampleStyleSheet()
 
     st_titulo = ParagraphStyle('titulo', fontName='Helvetica-Bold', fontSize=16,
                                textColor=colors.black, spaceAfter=2)

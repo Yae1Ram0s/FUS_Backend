@@ -37,9 +37,17 @@ rq==2.10.0
 # backend/backend/__init__.py.
 PyMySQL==1.2.0
 
+# Base de datos (PostgreSQL/Neon en producción, ver backend/settings.py:
+# DATABASE_URL) — [binary] trae los binarios precompilados de libpq, sin
+# necesidad de compilador ni headers de PostgreSQL instalados en el sistema
+# (equivalente al criterio de PyMySQL arriba, pero para Postgres). Sin esto,
+# Django truena con "ImproperlyConfigured: Error loading psycopg2 or psycopg
+# module" en cualquier despliegue que use DATABASE_URL con esquema postgres.
+psycopg[binary]>=3.2,<4
+
 # Sirve para leer DATABASE_URL como una sola variable de entorno (incluye
-# esquema mysql://) en vez de host/usuario/password sueltos — ver
-# backend/settings.py.
+# esquema mysql:// o postgresql://) en vez de host/usuario/password sueltos
+# — ver backend/settings.py.
 dj-database-url>=3.0,<4
 
 # Archivos estÃ¡ticos del admin en Render
@@ -50,3 +58,8 @@ reportlab==5.0.0
 pillow==12.2.0
 openpyxl==3.1.5
 python-pptx==1.0.2
+
+# Web Push (notificaciones del sistema operativo vía Service Worker, con la
+# app/pestaña cerrada) — firma los envíos con las llaves VAPID de
+# backend/settings.py. Ver services/notificaciones.py.
+pywebpush==2.4.0

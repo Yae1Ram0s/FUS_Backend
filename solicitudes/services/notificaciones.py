@@ -1,3 +1,4 @@
+import json
 import logging
 import threading
 from urllib.parse import urlencode
@@ -30,35 +31,139 @@ TIPO_EVENTO_ASUNTO = {
 
 
 def push_notificacion(notificacion):
-    """Publica una notificación interna en el canal del destinatario, sin
-    interrumpir el flujo si el channel layer falla (mismo criterio que
-    notificar_por_correo). Sin este try/except, un fallo aquí —p. ej. Redis
-    caído o un hiccup transitorio— tumbaba con un 500 la vista que apenas
-    acababa de guardar la transición de estatus (turnar, comisionar, atender,
-    concluir...), aunque el cambio ya estuviera comprometido en BD: el
-    usuario veía "error" en una acción que en realidad sí se aplicó."""
-    channel_layer = get_channel_layer()
-    if channel_layer is None:
-        return
+    """Publica una notificación interna en el canal del destinatario (para
+    quien tenga la app abierta en ese momento), sin interrumpir el flujo si
+    el channel layer falla (mismo criterio que notificar_por_correo). Sin
+    este try/except, un fallo aquí —p. ej. Redis caído o un hiccup
+    transitorio— tumbaba con un 500 la vista que apenas acababa de guardar la
+    transición de estatus (turnar, comisionar, atender, concluir...), aunque
+    el cambio ya estuviera comprometido en BD: el usuario veía "error" en una
+    acción que en realidad sí se aplicó.
 
-    data = {
-        'id': str(notificacion.id),
-        'fusFolio': notificacion.fusFolio,
-        'tipo': notificacion.tipoEvento,
-        'mensaje': notificacion.mensaje,
-        'leida': False,
-        'fechaCreacion': notificacion.fechaGeneracion.isoformat(),
-    }
+    Además encola el envío de Web Push real (ver _enviar_web_push_diferido) —
+    ese SÍ llega con la pestaña/app cerrada, a diferencia de esto, que solo
+    sirve mientras el WebSocket sigue conectado."""
+    channel_layer = get_channel_layer()
+    if channel_layer is not None:
+        data = {
+            'id': str(notificacion.id),
+            'fusFolio': notificacion.fusFolio,
+            'tipo': notificacion.tipoEvento,
+            'mensaje': notificacion.mensaje,
+            'leida': False,
+            'fechaCreacion': notificacion.fechaGeneracion.isoformat(),
+        }
+        try:
+            async_to_sync(channel_layer.group_send)(
+                f'notificaciones_{notificacion.idDestinatario_id}',
+                {'type': 'nueva_notificacion', 'data': data},
+            )
+        except Exception:
+            logger.exception(
+                'No se pudo publicar la notificación %s en el channel layer',
+                notificacion.id,
+            )
+
+    _enviar_web_push_diferido(notificacion.id)
+
+
+def _enviar_web_push_diferido(notificacion_id):
+    """Encola (RQ, si REDIS_URL está definido) o dispara en un hilo aparte
+    (respaldo sin Redis) el envío de Web Push real — mismo patrón que
+    notificar_por_correo_lote: la llamada de red a cada servicio de push
+    (Google/Mozilla/Apple) no debe bloquear la vista que disparó la
+    notificación (turnar, comisionar, atender, concluir...). `on_commit` por
+    la misma razón que allá: la mayoría de esas vistas van en
+    @transaction.atomic, y arrancar antes del commit vería el estado previo
+    (o nada) desde la conexión aparte del worker/hilo."""
+    if getattr(settings, 'RQ_QUEUES', None):
+        import django_rq
+        transaction.on_commit(
+            lambda: django_rq.get_queue().enqueue(_enviar_web_push, notificacion_id)
+        )
+    else:
+        transaction.on_commit(
+            lambda: threading.Thread(target=_enviar_web_push, args=(notificacion_id,), daemon=True).start()
+        )
+
+
+def _enviar_web_push(notificacion_id):
+    """Manda la notificación push real (Web Push, RFC 8030, firmado con las
+    llaves VAPID de settings) a cada dispositivo/navegador suscrito del
+    destinatario — a diferencia del aviso in-page por WebSocket, este SÍ
+    llega con la app/pestaña cerrada, tanto en PC como en celular (Android:
+    requiere Service Worker, que es justo lo que esto usa, a diferencia de
+    `new Notification()` directo, que ahí falla en silencio; iPhone: requiere
+    la PWA instalada — Apple no soporta Web Push en Safari normal)."""
+    if not getattr(settings, 'VAPID_PRIVATE_KEY', None):
+        return
     try:
-        async_to_sync(channel_layer.group_send)(
-            f'notificaciones_{notificacion.idDestinatario_id}',
-            {'type': 'nueva_notificacion', 'data': data},
+        from pywebpush import webpush, WebPushException
+
+        from ..models import Notificacion, PushSubscription
+
+        notificacion = (
+            Notificacion.objects.select_related('idDestinatario')
+            .filter(pk=notificacion_id).first()
         )
+        if not notificacion or not notificacion.idDestinatario_id:
+            return
+
+        suscripciones = list(PushSubscription.objects.filter(idUsuario_id=notificacion.idDestinatario_id))
+        if not suscripciones:
+            return
+
+        payload = json.dumps({
+            'id': str(notificacion.id),
+            'titulo': 'SCS — Nueva notificación',
+            'mensaje': notificacion.mensaje or '',
+            'fusFolio': notificacion.fusFolio or '',
+            'tipo': notificacion.tipoEvento,
+            'url': _ruta_por_rol(notificacion.idDestinatario, notificacion.fusFolio),
+        })
+        claims = {'sub': f'mailto:{getattr(settings, "VAPID_CLAIM_EMAIL", "soporte@anam.gob.mx")}'}
+
+        for sub in suscripciones:
+            try:
+                webpush(
+                    subscription_info={
+                        'endpoint': sub.endpoint,
+                        'keys': {'p256dh': sub.p256dh, 'auth': sub.auth},
+                    },
+                    data=payload,
+                    vapid_private_key=settings.VAPID_PRIVATE_KEY,
+                    vapid_claims=dict(claims),
+                )
+            except WebPushException as e:
+                status_code = getattr(e.response, 'status_code', None)
+                if status_code in (404, 410):
+                    # Suscripción vencida/revocada del lado del navegador — el
+                    # propio proveedor de push así lo indica; sin esto se
+                    # reintentaría para siempre contra un endpoint muerto.
+                    sub.delete()
+                else:
+                    logger.warning('Push falló para la suscripción %s: %s', sub.id, e)
+            except Exception:
+                logger.exception('Error inesperado al enviar push a la suscripción %s', sub.id)
     except Exception:
-        logger.exception(
-            'No se pudo publicar la notificación %s en el channel layer',
-            notificacion.id,
-        )
+        logger.exception('No se pudo procesar el envío de push para la notificación %s', notificacion_id)
+    finally:
+        connections.close_all()
+
+
+def _ruta_por_rol(destinatario, fus_folio):
+    """Misma regla de ruteo por rol que _enviar_correo_a, en formato relativo
+    (el Service Worker la resuelve contra el origen de la propia app)."""
+    rol = get_rol(destinatario)
+    if rol == 'ROL1':
+        ruta = '/rol1/consultar-fus'
+    elif rol == 'ROL2':
+        ruta = '/rol2/solicitudes'
+    else:
+        ruta = '/comisionado/fus-comisionados'
+    if fus_folio:
+        return f'{ruta}?{urlencode({"modo": "lista", "folio": fus_folio})}'
+    return ruta
 
 
 def notificar_por_correo(notificacion):

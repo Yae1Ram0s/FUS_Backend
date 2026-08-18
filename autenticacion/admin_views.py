@@ -1,11 +1,9 @@
-import os
 import platform
 import time
 from pathlib import Path
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.cache import cache
-from django.core.mail import send_mail
 from datetime import timedelta
 from django.db import connection, transaction
 from django.db.models.deletion import ProtectedError

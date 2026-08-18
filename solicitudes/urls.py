@@ -5,7 +5,6 @@ from .views import (
     TurnarFUSView,
     FUSActividadView,
     FUSDetalleAuditoriaView,
-    ConcluirTurnadoView,
     MarcarTurnadoAtendidoView,
     ConcluirPersonaTurnadoView,
     RechazarPersonaTurnadoView,
@@ -17,8 +16,6 @@ from .views import (
     NotificacionLimpiarView,
     BitacoraListView,
     BitacoraResponsablesView,
-    ExportarFUSExcelView,
-    ExportarFUSPDFView,
     ExportarBitacoraExcelView,
     ExportarBitacoraPDFView,
     DescargarFUSPDFView,
@@ -44,6 +41,9 @@ from .views import (
     ReporteTitularExportarPDFView,
     ReporteTitularOpcionesView,
     ReporteTitularResumenView,
+    PushDesuscribirView,
+    PushSuscribirView,
+    VapidPublicKeyView,
 )
 
 urlpatterns = [
@@ -72,7 +72,6 @@ urlpatterns = [
 
     # Turnados ROL2
     path('turnados/mis-turnados/',             MisTurnadosView.as_view(),        name='mis-turnados'),
-    path('turnados/<int:pk>/concluir/',        ConcluirTurnadoView.as_view(),    name='turnado-concluir'),
     path('turnados/<int:pk>/atendido/',        MarcarTurnadoAtendidoView.as_view(),  name='turnado-atendido'),
     path('turnados/<int:pk>/concluir-persona/', ConcluirPersonaTurnadoView.as_view(), name='turnado-concluir-persona'),
     path('turnados/<int:pk>/rechazar-persona/', RechazarPersonaTurnadoView.as_view(), name='turnado-rechazar-persona'),
@@ -87,15 +86,16 @@ urlpatterns = [
     path('notificaciones/limpiar/',                 NotificacionLimpiarView.as_view(),     name='notificaciones-limpiar'),
     path('notificaciones/<uuid:pk>/leer/',          NotificacionMarcarLeidaView.as_view(), name='notificacion-leer'),
 
+    # Web Push (Service Worker) — suscripción por dispositivo/navegador
+    path('push/vapid-public-key/', VapidPublicKeyView.as_view(),  name='push-vapid-public-key'),
+    path('push/suscribir/',        PushSuscribirView.as_view(),   name='push-suscribir'),
+    path('push/desuscribir/',      PushDesuscribirView.as_view(), name='push-desuscribir'),
+
     # Bitácora
     path('bitacora/',                          BitacoraListView.as_view(),          name='bitacora'),
     path('bitacora/responsables/',             BitacoraResponsablesView.as_view(), name='bitacora-responsables'),
     path('bitacora/exportar/excel/',           ExportarBitacoraExcelView.as_view(), name='bitacora-exportar-excel'),
     path('bitacora/exportar/pdf/',             ExportarBitacoraPDFView.as_view(),   name='bitacora-exportar-pdf'),
-
-    # Exportar FUS (lista)
-    path('fus/exportar/excel/',       ExportarFUSExcelView.as_view(),  name='fus-exportar-excel'),
-    path('fus/exportar/pdf/',         ExportarFUSPDFView.as_view(),    name='fus-exportar-pdf'),
 
     # Descargar FUS individual (folio contiene slashes → path converter)
     path('fus/<path:folio>/pdf/',     DescargarFUSPDFView.as_view(),   name='fus-descargar-pdf'),

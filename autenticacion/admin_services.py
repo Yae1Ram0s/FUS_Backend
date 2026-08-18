@@ -4,7 +4,7 @@ from django.contrib.auth.models import User
 from django.db import transaction
 from django.utils import timezone
 from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
-from .models import AuditoriaAdministrativa, CorreoAutorizado, SeguridadUsuario
+from .models import AuditoriaAdministrativa, SeguridadUsuario
 
 
 def seguridad(user):
