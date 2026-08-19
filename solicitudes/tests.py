@@ -767,6 +767,58 @@ class SeguimientoComisionadoNotificaAlTitularTests(APITestCase):
         )
 
 
+class SeguimientoComisionadoNotificaAlDuenoEnOtraUnidadTests(APITestCase):
+    """SeguimientoComisionadoListCreateView.post — el cálculo de destinatarios
+    "lado del Particular" resolvía la unidad del COMISIONADO, no la del dueño
+    real del FUS (idSolicitanteInterno). Si el FUS llegó al comisionado vía un
+    Turnado a un Rol 2 de otra unidad (que comisiona desde ahí, ver
+    FUSComisionadosDisponiblesView), el comisionado termina en una unidad
+    distinta a la del Rol 1 original — y ese Rol 1 se quedaba sin
+    notificación aunque el FUS siguiera siendo suyo."""
+
+    @classmethod
+    def setUpTestData(cls):
+        Estatus.objects.get_or_create(
+            clave='Registrado', defaults={'nombre': 'Registrado', 'tipoFlujo': 'PARTICULAR', 'orden': 1},
+        )
+        cls.medio = MedioRecepcion.objects.create(nombreMedio='Correo electrónico', paraTurnado=1)
+        unidad_rol1 = UnidadAdministrativa.objects.create(
+            idUnidadAdministrativa=99010, unidadAdministrativa='Dirección A', esUnidadAdministrativa=1, activo=1,
+        )
+        unidad_comisionado = UnidadAdministrativa.objects.create(
+            idUnidadAdministrativa=99011, unidadAdministrativa='Dirección B', esUnidadAdministrativa=1, activo=1,
+        )
+        cls.rol1 = User.objects.create_user(username='rol1u@t.mx', email='rol1u@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rol1u@t.mx', nombre='Rol1', rol='ROL1', activo=1, unidadAdministrativa=unidad_rol1)
+        cls.rol2 = User.objects.create_user(username='rol2u@t.mx', email='rol2u@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rol2u@t.mx', nombre='Rol2', rol='ROL2', activo=1, unidadAdministrativa=unidad_comisionado)
+        cls.comisionado = User.objects.create_user(username='comiu@t.mx', email='comiu@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='comiu@t.mx', nombre='Comi', rol='COMISIONADO', activo=1, unidadAdministrativa=unidad_comisionado)
+
+        cls.fus = FUS.objects.create(
+            folio='ANAM/PARTICULAR/FUS/0703/2026', idSolicitanteInterno=cls.rol1,
+            descripcion='x', contexto='', estatusParticular_id='En_seguimiento',
+            idUsuarioRegistra=cls.rol1.id, idComisionado=cls.comisionado,
+        )
+        Turnado.objects.create(
+            idFus=cls.fus, idRemitente=cls.rol1, idDestinatario=cls.rol2,
+            idMedio=cls.medio, estatusTitular_id='En_seguimiento', activo=1,
+        )
+
+    def test_dueno_original_recibe_notificacion_aunque_el_comisionado_sea_de_otra_unidad(self):
+        self.client.force_authenticate(user=self.comisionado)
+        resp = self.client.post(f'/api/fus/{self.fus.pk}/seguimiento/', {
+            'tipo': 'avance', 'contenido': 'Ya empecé a revisar el expediente.',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+
+        self.assertTrue(
+            Notificacion.objects.filter(
+                idDestinatario=self.rol1, fusFolio=self.fus.folio, tipoEvento='SEGUIMIENTO_FINALIZADO',
+            ).exists()
+        )
+
+
 class AtendidoFUSNotificaAlTitularTests(APITestCase):
     """AtendidoFUSView — mismo criterio que SeguimientoComisionadoNotificaAlTitularTests:
     si el FUS llegó al comisionado vía un Turnado, ese Titular también debe
@@ -803,6 +855,57 @@ class AtendidoFUSNotificaAlTitularTests(APITestCase):
         self.assertTrue(
             Notificacion.objects.filter(
                 idDestinatario=self.rol2, fusFolio=self.fus.folio, tipoEvento='SEGUIMIENTO_FINALIZADO',
+            ).exists()
+        )
+
+
+class AtendidoFUSNotificaAlDuenoEnOtraUnidadTests(APITestCase):
+    """AtendidoFUSView — mismo caso que
+    SeguimientoComisionadoNotificaAlDuenoEnOtraUnidadTests: el dueño real del
+    FUS debe enterarse de que ya se mandó a validación aunque el comisionado
+    asignado sea de otra unidad administrativa."""
+
+    @classmethod
+    def setUpTestData(cls):
+        Estatus.objects.get_or_create(
+            clave='Registrado', defaults={'nombre': 'Registrado', 'tipoFlujo': 'PARTICULAR', 'orden': 1},
+        )
+        cls.medio = MedioRecepcion.objects.create(nombreMedio='Correo electrónico', paraTurnado=1)
+        unidad_rol1 = UnidadAdministrativa.objects.create(
+            idUnidadAdministrativa=99012, unidadAdministrativa='Dirección C', esUnidadAdministrativa=1, activo=1,
+        )
+        unidad_comisionado = UnidadAdministrativa.objects.create(
+            idUnidadAdministrativa=99013, unidadAdministrativa='Dirección D', esUnidadAdministrativa=1, activo=1,
+        )
+        cls.rol1 = User.objects.create_user(username='rol1v@t.mx', email='rol1v@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rol1v@t.mx', nombre='Rol1', rol='ROL1', activo=1, unidadAdministrativa=unidad_rol1)
+        cls.rol2 = User.objects.create_user(username='rol2v@t.mx', email='rol2v@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rol2v@t.mx', nombre='Rol2', rol='ROL2', activo=1, unidadAdministrativa=unidad_comisionado)
+        cls.comisionado = User.objects.create_user(username='comiv@t.mx', email='comiv@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='comiv@t.mx', nombre='Comi', rol='COMISIONADO', activo=1, unidadAdministrativa=unidad_comisionado)
+
+        cls.fus = FUS.objects.create(
+            folio='ANAM/PARTICULAR/FUS/0704/2026', idSolicitanteInterno=cls.rol1,
+            descripcion='x', contexto='', estatusParticular_id='Atendido',
+            idUsuarioRegistra=cls.rol1.id, idComisionado=cls.comisionado,
+        )
+        Turnado.objects.create(
+            idFus=cls.fus, idRemitente=cls.rol1, idDestinatario=cls.rol2,
+            idMedio=cls.medio, estatusTitular_id='En_seguimiento', activo=1,
+        )
+
+    def test_dueno_original_recibe_notificacion_aunque_el_comisionado_sea_de_otra_unidad(self):
+        # Lo dispara rol2 (destinatario del Turnado), no rol1: si fuera rol1
+        # quien lo dispara, `destinatarios.discard(user)` lo quitaría de su
+        # propia notificación y la prueba no distinguiría "nunca se agregó"
+        # de "se agregó y luego se descartó por ser el actor".
+        self.client.force_authenticate(user=self.rol2)
+        resp = self.client.post(f'/api/fus/{self.fus.pk}/atendido/', {}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        self.assertTrue(
+            Notificacion.objects.filter(
+                idDestinatario=self.rol1, fusFolio=self.fus.folio, tipoEvento='SEGUIMIENTO_FINALIZADO',
             ).exists()
         )
 

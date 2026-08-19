@@ -227,12 +227,20 @@ class SeguimientoComisionadoListCreateView(APIView):
 
                 # Sin esto, nadie se enteraba en vivo de que el comisionado ya
                 # atendió el FUS — mismo criterio de destinatarios que
-                # AtendidoFUSView (unidad del comisionado, o dueño directo si
-                # no hay comisionado, más su(s) EQUIPO_PARTICULAR).
+                # AtendidoFUSView (Rol 1 de la unidad del comisionado, que
+                # pueden compartir supervisión, MÁS el dueño real del FUS).
+                # El dueño se agrega siempre, no solo cuando no hay
+                # comisionado: si el FUS llegó al comisionado vía un Turnado a
+                # otra unidad (el Titular delegó en vez de responder directo),
+                # `_particulares_area(_unidad_id(fus.idComisionado))` resuelve
+                # la unidad del comisionado, no la del dueño original, y este
+                # último se quedaba sin avisar aunque el FUS siguiera siendo
+                # suyo.
                 destinatarios = set(
-                    _particulares_area(_unidad_id(fus.idComisionado)) if fus.idComisionado_id
-                    else ([fus.idSolicitanteInterno] if fus.idSolicitanteInterno_id else [])
+                    _particulares_area(_unidad_id(fus.idComisionado)) if fus.idComisionado_id else []
                 )
+                if fus.idSolicitanteInterno_id:
+                    destinatarios.add(fus.idSolicitanteInterno)
                 destinatarios |= set(_equipo_particular_de(fus.idSolicitanteInterno))
                 # Si el FUS llegó al comisionado vía un Turnado (el Titular lo
                 # delegó en vez de responder directo), esa persona también se
@@ -297,14 +305,18 @@ class AtendidoFUSView(APIView):
                  ip=ip, folio=fus.folio, estado_ant=est_ant, estado_nuevo='Pendiente_validacion')
 
             # Con comisionado: se notifica a todos los Rol 1 de su unidad (varios
-            # pueden compartir supervisión). Sin comisionado (Rol 2 directo, este
-            # mismo endpoint también lo dispara): _unidad_id(None) no resuelve
-            # nada, así que se notifica directo al dueño real del FUS — más su(s)
-            # asistente(s) EQUIPO_PARTICULAR, que comparten esa misma pantalla.
+            # pueden compartir supervisión) MÁS el dueño real del FUS — este
+            # último se agrega siempre, no solo cuando no hay comisionado: si
+            # el FUS llegó al comisionado vía un Turnado a otra unidad (el
+            # Titular delegó en vez de responder directo), la unidad del
+            # comisionado no es la del dueño original, y se quedaba sin avisar
+            # aunque el FUS siguiera siendo suyo. Más su(s) asistente(s)
+            # EQUIPO_PARTICULAR, que comparten esa misma pantalla.
             destinatarios = set(
-                _particulares_area(_unidad_id(fus.idComisionado)) if fus.idComisionado_id
-                else ([fus.idSolicitanteInterno] if fus.idSolicitanteInterno_id else [])
+                _particulares_area(_unidad_id(fus.idComisionado)) if fus.idComisionado_id else []
             )
+            if fus.idSolicitanteInterno_id:
+                destinatarios.add(fus.idSolicitanteInterno)
             destinatarios |= set(_equipo_particular_de(fus.idSolicitanteInterno))
             # Mismo criterio que SeguimientoComisionadoListCreateView.post: si el
             # FUS llegó al comisionado vía un Turnado, ese Titular también se
