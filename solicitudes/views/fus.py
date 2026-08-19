@@ -2,6 +2,7 @@ import os
 import re
 
 from django.conf import settings
+from django.db import connection
 from django.db.models import Count, Q, FloatField
 from django.db.models.expressions import RawSQL
 from django.http import FileResponse, Http404
@@ -146,7 +147,11 @@ class FUSListCreateView(APIView):
                 Q(turnados__seguimientos__descripcionActividad__icontains=search) |
                 Q(turnados__seguimientos__accionTexto__icontains=search)
             )
-            termino_fulltext = _termino_fulltext_booleano(search)
+            # MATCH()...AGAINST() es sintaxis de MySQL — en otros motores
+            # (Postgres/Neon en Render) el índice FULLTEXT ni existe (ver
+            # migración 0033), así que ahí siempre se cae al respaldo con
+            # icontains de abajo en vez de emitir una consulta inválida.
+            termino_fulltext = _termino_fulltext_booleano(search) if connection.vendor == 'mysql' else None
             if termino_fulltext:
                 # Migración 0033: usa los índices FULLTEXT de
                 # descripcion/contexto, evidencias y turnados en vez del

@@ -64,7 +64,37 @@ SQL_BORRAR_IDX_TURNADO = (
 )
 
 
+# CREATE FULLTEXT INDEX es sintaxis exclusiva de MySQL/InnoDB — en cualquier
+# otro motor (Postgres/Neon en Render, ver backend/settings.py DATABASE_URL)
+# la sentencia ni siquiera es válida y tronaba `migrate` con exit status 1
+# en el build de Render. Los índices son solo una optimización (ver
+# FUSListCreateView.get / _termino_fulltext_booleano, que ya cae a icontains
+# cuando no aplica), así que en otros motores esta migración simplemente no
+# hace nada — no hay un equivalente 1:1 de FULLTEXT que valga la pena emular
+# aquí para un motor que de momento no la usa.
+def crear_indices_fulltext(apps, schema_editor):
+    if schema_editor.connection.vendor != 'mysql':
+        return
+    schema_editor.execute(SQL_CREAR_IDX_FUS)
+    schema_editor.execute(SQL_CREAR_IDX_EVIDENCIA)
+    schema_editor.execute(SQL_CREAR_IDX_TURNADO)
+
+
+def borrar_indices_fulltext(apps, schema_editor):
+    if schema_editor.connection.vendor != 'mysql':
+        return
+    schema_editor.execute(SQL_BORRAR_IDX_TURNADO)
+    schema_editor.execute(SQL_BORRAR_IDX_EVIDENCIA)
+    schema_editor.execute(SQL_BORRAR_IDX_FUS)
+
+
 class Migration(migrations.Migration):
+    # MySQL no soporta DDL transaccional (no puede hacer rollback de un
+    # CREATE INDEX) — con la migración envuelta en una transacción implícita
+    # (default), Django rechaza ejecutar el DDL de arriba con
+    # TransactionManagementError. RunSQL lo manejaba solo; RunPython
+    # necesita este atomic=False explícito para el mismo caso.
+    atomic = False
 
     dependencies = [
         ('solicitudes', '0032_turnado_medioespecificacion'),
@@ -74,7 +104,5 @@ class Migration(migrations.Migration):
         # state_operations no aplica: no hay una representación de FULLTEXT
         # en el ORM de Django para MySQL, así que esto no modifica el
         # estado de ningún campo/modelo — solo emite el DDL del índice.
-        migrations.RunSQL(sql=SQL_CREAR_IDX_FUS, reverse_sql=SQL_BORRAR_IDX_FUS),
-        migrations.RunSQL(sql=SQL_CREAR_IDX_EVIDENCIA, reverse_sql=SQL_BORRAR_IDX_EVIDENCIA),
-        migrations.RunSQL(sql=SQL_CREAR_IDX_TURNADO, reverse_sql=SQL_BORRAR_IDX_TURNADO),
+        migrations.RunPython(crear_indices_fulltext, borrar_indices_fulltext),
     ]
