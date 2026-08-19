@@ -236,6 +236,50 @@ class AdminResumenAnaliticaView(APIView):
             for row in dispositivos_rows
         ]
 
+        snapshot_por_usuario = {}
+        for row in qs.exclude(usuario_id__isnull=True).values('usuario_id', 'rolSnapshot', 'unidadSnapshot'):
+            snapshot_por_usuario.setdefault(row['usuario_id'], (row['rolSnapshot'], row['unidadSnapshot']))
+        duracion_por_usuario = defaultdict(list)
+        for usuario_id, duracion in (
+            qs.exclude(duracionMs__isnull=True).exclude(usuario_id__isnull=True)
+            .values_list('usuario_id', 'duracionMs')
+        ):
+            duracion_por_usuario[usuario_id].append(duracion)
+        filas_usuarios = qs.exclude(usuario_id__isnull=True).values('usuario_id', 'usuario__email').annotate(
+            eventos=Count('idEvento'),
+            accionesSignificativas=Count('idEvento', filter=Q(evento__in=EVENTOS_SIGNIFICATIVOS)),
+            sesiones=Count('sesionId', distinct=True, filter=~Q(sesionId='')),
+            exitos=Count('idEvento', filter=Q(evento__in=('FORM_SUBMITTED', 'TASK_COMPLETED'))),
+            errores=Count('idEvento', filter=Q(evento='TASK_FAILED')),
+            abandonos=Count('idEvento', filter=Q(evento__in=('FORM_ABANDONED', 'TASK_ABANDONED'))),
+            modulosUsados=Count('modulo', distinct=True),
+            ultimaActividad=Max('fechaServidor'),
+        ).order_by('-accionesSignificativas', '-eventos')[:300]
+        nombres_por_email = dict(
+            CorreoAutorizado.objects.filter(
+                email__in=[row['usuario__email'] for row in filas_usuarios]
+            ).values_list('email', 'nombre')
+        )
+        usuarios = []
+        for row in filas_usuarios:
+            terminales = row['exitos'] + row['errores'] + row['abandonos']
+            rol, unidad = snapshot_por_usuario.get(row['usuario_id'], ('', ''))
+            usuarios.append({
+                'id': row['usuario_id'],
+                'email': row['usuario__email'],
+                'nombre': nombres_por_email.get(row['usuario__email']) or row['usuario__email'],
+                'rol': rol,
+                'unidad': unidad,
+                'eventos': row['eventos'],
+                'accionesSignificativas': row['accionesSignificativas'],
+                'sesiones': row['sesiones'],
+                'modulosUsados': row['modulosUsados'],
+                'tasaExito': _porcentaje(row['exitos'], terminales),
+                'tasaError': _porcentaje(row['errores'], terminales),
+                'duracionMedianaMs': _mediana(duracion_por_usuario[row['usuario_id']]),
+                'ultimaActividad': row['ultimaActividad'].isoformat() if row['ultimaActividad'] else None,
+            })
+
         embudos = []
         for modulo_nombre in qs.values_list('modulo', flat=True).distinct():
             modulo_qs = qs.filter(modulo=modulo_nombre)
@@ -313,6 +357,7 @@ class AdminResumenAnaliticaView(APIView):
             'componentes': componentes,
             'roles': roles,
             'dispositivos': dispositivos,
+            'usuarios': usuarios,
             'embudos': embudos,
             'oportunidades': oportunidades,
             'filtros': {
