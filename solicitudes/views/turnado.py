@@ -520,6 +520,14 @@ class MarcarTurnadoAtendidoView(APIView):
 
         titular_auth = CorreoAutorizado.objects.filter(email=user.email, activo=1).first()
         nombre_titular = titular_auth.nombre if titular_auth else (user.first_name or user.email)
+        # "Su parte" solo tiene sentido cuando hay más de una persona turnada
+        # — con un único destinatario, esa persona es todo el FUS, no "una
+        # parte" de él, así que el mensaje se ajusta para no leerse raro.
+        es_unico_turnado = fus.turnados.filter(activo=1).count() == 1
+        if es_unico_turnado:
+            mensaje = f"{nombre_titular} envió para validación el FUS {fus.folio}."
+        else:
+            mensaje = f"{nombre_titular} envió su parte del FUS {fus.folio} para validación."
         destinatarios = {fus.idSolicitanteInterno} | set(_equipo_particular_de(fus.idSolicitanteInterno))
         destinatarios.discard(user)
         for destinatario in destinatarios:
@@ -527,7 +535,7 @@ class MarcarTurnadoAtendidoView(APIView):
                 idDestinatario=destinatario,
                 fusFolio=fus.folio,
                 tipoEvento='SEGUIMIENTO_FINALIZADO',
-                mensaje=f"{nombre_titular} marcó su parte del FUS {fus.folio} como atendida.",
+                mensaje=mensaje,
             )
             push_notificacion(_notif)
             notificar_por_correo(_notif)
@@ -536,6 +544,10 @@ class MarcarTurnadoAtendidoView(APIView):
             'detail': 'Marcado como atendido.',
             'estatusTitular': turnado.estatusTitular_id,
             'estatusParticular': fus.estatusParticular_id,
+            # Para que el frontend pueda elegir el mismo texto ("tu parte" vs.
+            # el FUS completo) sin tener que volver a consultar cuántos
+            # turnados tiene el FUS — ver mensaje de la notificación arriba.
+            'esUnicoTurnado': es_unico_turnado,
         })
 
 
@@ -602,14 +614,24 @@ class ConcluirPersonaTurnadoView(APIView):
             _log(usuario=destinatario_turnado.email, rol='ROL2', accion='CONCLUSION_FUS',
                  ip=ip, folio=fus.folio, estado_ant=est_ant, estado_nuevo='Concluido')
 
+        # "Tu/su parte" solo tiene sentido cuando hay más de una persona
+        # turnada — con un único destinatario, esa persona es todo el FUS,
+        # no "una parte" de él (mismo criterio que MarcarTurnadoAtendidoView).
+        es_unico_turnado = fus.turnados.filter(activo=1).count() == 1
+
         if destinatario_turnado:
             concluye_auth = CorreoAutorizado.objects.filter(email=user.email, activo=1).first()
             nombre_concluye = concluye_auth.nombre if concluye_auth else (user.first_name or user.email)
+            mensaje_persona = (
+                f"{nombre_concluye} concluyó el FUS {fus.folio}."
+                if es_unico_turnado else
+                f"{nombre_concluye} concluyó tu parte del FUS {fus.folio}."
+            )
             _notif = Notificacion.objects.create(
                 idDestinatario=destinatario_turnado,
                 fusFolio=fus.folio,
                 tipoEvento='SOLICITUD_APROBADA',
-                mensaje=f"{nombre_concluye} concluyó tu parte del FUS {fus.folio}.",
+                mensaje=mensaje_persona,
             )
             push_notificacion(_notif)
             notificar_por_correo(_notif)
@@ -623,6 +645,11 @@ class ConcluirPersonaTurnadoView(APIView):
             fus.idUsuarioModifica    = user.id
             fus.save()
 
+            mensaje_fus = (
+                f"El FUS {fus.folio} fue concluido."
+                if es_unico_turnado else
+                f"El FUS {fus.folio} fue concluido — todas las personas turnadas atendieron su parte."
+            )
             destinatarios_fus = {fus.idSolicitanteInterno} | set(_equipo_particular_de(fus.idSolicitanteInterno))
             destinatarios_fus.discard(user)
             _notifs_fus = []
@@ -631,7 +658,7 @@ class ConcluirPersonaTurnadoView(APIView):
                     idDestinatario=destinatario,
                     fusFolio=fus.folio,
                     tipoEvento='CONCLUIDO',
-                    mensaje=f"El FUS {fus.folio} fue concluido — todas las personas turnadas atendieron su parte.",
+                    mensaje=mensaje_fus,
                 )
                 push_notificacion(_notif_fus)
                 _notifs_fus.append(_notif_fus)

@@ -1243,6 +1243,92 @@ class ValidacionPorPersonaTurnadoTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
 
+class MensajeNotificacionSegunNumeroTurnadosTests(APITestCase):
+    """MarcarTurnadoAtendidoView / ConcluirPersonaTurnadoView — el mensaje de
+    la notificación evita decir "tu/su parte" cuando el FUS solo tiene un
+    Titular turnado: ahí esa persona ES todo el FUS, no "una parte" de él."""
+
+    @classmethod
+    def setUpTestData(cls):
+        for clave in ('Turnado', 'En_seguimiento', 'Atendido', 'Pendiente_validacion', 'Concluido'):
+            Estatus.objects.get_or_create(
+                clave=clave, defaults={'nombre': clave, 'tipoFlujo': 'PARTICULAR', 'orden': 1},
+            )
+        cls.medio = MedioRecepcion.objects.create(nombreMedio='Correo electrónico', paraTurnado=1)
+        cls.rol1 = User.objects.create_user(username='rol1m@t.mx', email='rol1m@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rol1m@t.mx', nombre='Rol1', rol='ROL1', activo=1)
+
+    def _crear_fus_con_turnados(self, folio, emails):
+        fus = FUS.objects.create(
+            folio=folio, idSolicitanteInterno=self.rol1,
+            descripcion='x', contexto='', estatusParticular_id='Turnado',
+            idUsuarioRegistra=self.rol1.id,
+        )
+        turnados = []
+        for email in emails:
+            u = User.objects.create_user(username=email, email=email, password='x')
+            CorreoAutorizado.objects.create(email=email, nombre=email.split('@')[0], rol='ROL2', activo=1)
+            turnados.append(Turnado.objects.create(
+                idFus=fus, idRemitente=self.rol1, idDestinatario=u,
+                idMedio=self.medio, estatusTitular_id='Recibido', activo=1,
+            ))
+        return fus, turnados
+
+    def test_mensaje_atendido_un_solo_turnado(self):
+        fus, [t] = self._crear_fus_con_turnados('ANAM/PARTICULAR/FUS/0300/2026', ['solo1@t.mx'])
+        self.client.force_authenticate(user=t.idDestinatario)
+        self.client.post(f'/api/turnados/{t.id}/seguimientos/', {'descripcionActividad': 'Reviso', 'accionTexto': ''})
+        resp = self.client.post(f'/api/turnados/{t.id}/atendido/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertTrue(resp.data['esUnicoTurnado'])
+
+        notif = Notificacion.objects.filter(fusFolio=fus.folio, tipoEvento='SEGUIMIENTO_FINALIZADO').first()
+        self.assertIsNotNone(notif)
+        self.assertNotIn('parte', notif.mensaje)
+        self.assertIn('envió para validación el FUS', notif.mensaje)
+
+    def test_mensaje_atendido_varios_turnados(self):
+        fus, [t1, _t2] = self._crear_fus_con_turnados('ANAM/PARTICULAR/FUS/0301/2026', ['multi1@t.mx', 'multi2@t.mx'])
+        self.client.force_authenticate(user=t1.idDestinatario)
+        self.client.post(f'/api/turnados/{t1.id}/seguimientos/', {'descripcionActividad': 'Reviso', 'accionTexto': ''})
+        resp = self.client.post(f'/api/turnados/{t1.id}/atendido/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertFalse(resp.data['esUnicoTurnado'])
+
+        notif = Notificacion.objects.filter(fusFolio=fus.folio, tipoEvento='SEGUIMIENTO_FINALIZADO').first()
+        self.assertIsNotNone(notif)
+        self.assertIn('su parte', notif.mensaje)
+
+    def test_mensaje_concluir_persona_un_solo_turnado(self):
+        fus, [t] = self._crear_fus_con_turnados('ANAM/PARTICULAR/FUS/0302/2026', ['solo2@t.mx'])
+        self.client.force_authenticate(user=t.idDestinatario)
+        self.client.post(f'/api/turnados/{t.id}/seguimientos/', {'descripcionActividad': 'Reviso', 'accionTexto': ''})
+        self.client.post(f'/api/turnados/{t.id}/atendido/')
+
+        self.client.force_authenticate(user=self.rol1)
+        resp = self.client.post(f'/api/turnados/{t.id}/concluir-persona/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        notif = Notificacion.objects.filter(fusFolio=fus.folio, tipoEvento='SOLICITUD_APROBADA').first()
+        self.assertIsNotNone(notif)
+        self.assertNotIn('parte', notif.mensaje)
+        self.assertIn('concluyó el FUS', notif.mensaje)
+
+    def test_mensaje_concluir_persona_varios_turnados(self):
+        fus, [t1, _t2] = self._crear_fus_con_turnados('ANAM/PARTICULAR/FUS/0303/2026', ['multi3@t.mx', 'multi4@t.mx'])
+        self.client.force_authenticate(user=t1.idDestinatario)
+        self.client.post(f'/api/turnados/{t1.id}/seguimientos/', {'descripcionActividad': 'Reviso', 'accionTexto': ''})
+        self.client.post(f'/api/turnados/{t1.id}/atendido/')
+
+        self.client.force_authenticate(user=self.rol1)
+        resp = self.client.post(f'/api/turnados/{t1.id}/concluir-persona/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        notif = Notificacion.objects.filter(fusFolio=fus.folio, tipoEvento='SOLICITUD_APROBADA').first()
+        self.assertIsNotNone(notif)
+        self.assertIn('concluyó tu parte', notif.mensaje)
+
+
 class BusquedaFUSFulltextTests(APITransactionTestCase):
     """FUSListCreateView.get(search=...) — migración 0033: MATCH()...AGAINST()
     IN BOOLEAN MODE sobre FUS.descripcion/contexto, Evidencia.nombreArchivo/
