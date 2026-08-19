@@ -111,15 +111,8 @@ class VerificarCorreoView(APIView):
     """
     POST { email }
     Determina si el correo está autorizado y, de estarlo, si ya tiene cuenta
-    (pide contraseña) o es primer ingreso (pasa directo a crearla).
-
-    El paso de código OTP por correo queda suspendido por ahora (ver
-    EstablecerContrasenaView, que ya no lo exige) — antes este endpoint no
-    distinguía "no autorizado" de "primer ingreso" (mismo 'estado': 'nuevo'
-    para ambos) para no revelar la whitelist sin, de todas formas, dejar
-    entrar a nadie sin el código; al quitar ese código, un correo no
-    autorizado debe rechazarse aquí mismo en vez de seguir a crear
-    contraseña.
+    (pide contraseña) o es primer ingreso — en ese caso genera y envía el
+    OTP que EstablecerContrasenaView exige para crear la cuenta.
     """
     permission_classes  = [AllowAny]
     throttle_classes    = [OTPThrottle]
@@ -138,6 +131,12 @@ class VerificarCorreoView(APIView):
         if django_user and django_user.has_usable_password():
             return Response({'estado': 'existente'})
 
+        codigo = _generar_otp(email, request.META.get('REMOTE_ADDR'))
+        enviar_correo_otp(
+            email, codigo,
+            intro='Recibimos una solicitud de acceso al Sistema de Control de Solicitudes. Utiliza el siguiente código para completar tu inicio de sesión.',
+            asunto='Tu código de acceso — Sistema de Control de Solicitudes',
+        )
         return Response({'estado': 'nuevo'})
 
 
@@ -164,13 +163,8 @@ class VerificarOTPView(APIView):
 class EstablecerContrasenaView(APIView):
     """
     POST { email, codigo, password }
-    Crea el usuario Django y devuelve tokens JWT.
-
-    `codigo` es opcional mientras el paso de OTP por correo esté suspendido
-    (ver VerificarCorreoView) — si el frontend no manda uno, se omite la
-    validación en vez de rechazar la petición; si algún día se reactiva el
-    envío de OTP, basta con que el frontend vuelva a mandarlo y este mismo
-    bloque lo vuelve a exigir sin más cambios aquí.
+    Crea el usuario Django y devuelve tokens JWT. `codigo` es el OTP que
+    VerificarCorreoView envió por correo al detectar primer ingreso.
     """
     permission_classes = [AllowAny]
     throttle_classes   = [OTPThrottle]
@@ -190,19 +184,16 @@ class EstablecerContrasenaView(APIView):
         except CorreoAutorizado.DoesNotExist:
             return Response({'detail': 'Correo no autorizado.'}, status=status.HTTP_401_UNAUTHORIZED)
 
-        # Todo el tramo (validar OTP si aplica, crear el usuario, consumir
-        # el OTP) queda dentro de una sola transacción: el
-        # select_for_update() de validar_otp mantiene el registro bloqueado
-        # hasta el commit, así que dos requests concurrentes con el mismo
-        # código nunca lo consumen dos veces (la segunda vuelve a evaluar
-        # `usado=0` ya bloqueada y encuentra el OTP recién gastado por la
-        # primera).
+        # Todo el tramo (validar OTP, crear el usuario, consumir el OTP)
+        # queda dentro de una sola transacción: el select_for_update() de
+        # validar_otp mantiene el registro bloqueado hasta el commit, así
+        # que dos requests concurrentes con el mismo código nunca lo
+        # consumen dos veces (la segunda vuelve a evaluar `usado=0` ya
+        # bloqueada y encuentra el OTP recién gastado por la primera).
         with transaction.atomic():
-            otp = None
-            if codigo:
-                otp, error = validar_otp(email, codigo, marcar_usado=False)
-                if error:
-                    return Response({'detail': error}, status=status.HTTP_400_BAD_REQUEST)
+            otp, error = validar_otp(email, codigo, marcar_usado=False)
+            if error:
+                return Response({'detail': error}, status=status.HTTP_400_BAD_REQUEST)
 
             user = User.objects.select_for_update().filter(email=email).first()
             if user and user.has_usable_password():
@@ -219,9 +210,8 @@ class EstablecerContrasenaView(APIView):
             except IntegrityError:
                 return Response({'detail': 'Esta cuenta ya fue creada. Intenta iniciar sesión.'}, status=400)
 
-            if otp:
-                otp.usado = 1
-                otp.save(update_fields=['usado'])
+            otp.usado = 1
+            otp.save(update_fields=['usado'])
 
         refresh = emitir_tokens(user)
         _log(usuario=email, rol=autorizado.rol, accion='REGISTRO', ip=request.META.get('REMOTE_ADDR'))

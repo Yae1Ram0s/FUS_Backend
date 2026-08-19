@@ -179,6 +179,14 @@ class OTPFlowAPITests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertFalse(User.objects.filter(email=self.email).exists())
 
+    def test_establecer_contrasena_sin_codigo_400(self):
+        self._crear_otp(codigo='555555')
+        resp = self.client.post('/api/auth/establecer-contrasena/', {
+            'email': self.email, 'password': 'Sup3rSegura!2026',
+        })
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(User.objects.filter(email=self.email).exists())
+
     def test_restablecer_contrasena_consume_otp_y_cambia_password(self):
         user = User.objects.create_user(username=self.email, email=self.email, password='ViejaPass!123')
         self._crear_otp(codigo='555555')
@@ -199,10 +207,7 @@ class OTPFlowAPITests(APITestCase):
         resp = self.client.post('/api/auth/verificar-correo/', {'email': self.email})
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data['estado'], 'nuevo')
-        # El paso de OTP por correo en verificar-correo está suspendido (ver
-        # docstring de VerificarCorreoView): ya no dispara el envío aquí,
-        # EstablecerContrasenaView lo hace opcional.
-        enviar_mock.assert_not_called()
+        enviar_mock.assert_called_once()
 
     def test_establecer_contrasena_activa_usuario_sin_password(self):
         user = User(username=self.email, email=self.email)
