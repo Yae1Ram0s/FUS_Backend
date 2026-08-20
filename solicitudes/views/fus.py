@@ -598,7 +598,19 @@ def generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL1', turnado_id=No
     from reportlab.lib.styles import ParagraphStyle
     from reportlab.lib import colors
     from reportlab.lib.units import cm
+    from xml.sax.saxutils import escape as _esc_xml
     import io
+
+    def esc(valor):
+        """Escapa &/</> antes de insertarlo en un Paragraph — ReportLab lee
+        ese texto como marcado XML (negritas, <br/>, etc.), así que texto
+        libre del usuario (descripción, contexto, comentarios, respuestas...)
+        sin escapar rompe el parseo o, peor, se pierde en silencio (ReportLab
+        descarta lo que interpreta como una etiqueta desconocida) — el PDF
+        terminaba guardando información incompleta o corrupta sin ningún
+        error visible. Ej.: 'Ref: A&B <confidencial>' quedaba truncado a
+        'Ref: A&B;'."""
+        return _esc_xml(str(valor)) if valor not in (None, '') else valor
 
     evidencias = [e for e in fus.evidencias.all() if e.activo]
     turnados = [t for t in fus.turnados.all() if t.activo]
@@ -667,7 +679,7 @@ def generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL1', turnado_id=No
         return t
 
     def fila(lbl, val):
-        return [Paragraph(lbl, st_lbl), Paragraph(str(val) if val else '—', st_val)]
+        return [Paragraph(lbl, st_lbl), Paragraph(esc(val) if val else '—', st_val)]
 
     # ── Datos generales ──
     medio_recepcion = (
@@ -733,9 +745,9 @@ def generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL1', turnado_id=No
     if evidencias:
         ev_rows = []
         for ev in evidencias:
-            texto = ev.nombreArchivo or '—'
+            texto = esc(ev.nombreArchivo) if ev.nombreArchivo else '—'
             if ev.comentarios:
-                texto += f' — {ev.comentarios}'
+                texto += f' — {esc(ev.comentarios)}'
             ev_rows.append([Paragraph(texto, st_val)])
         evt = Table(ev_rows, colWidths=[W])
         evt.setStyle(TableStyle([
@@ -751,11 +763,11 @@ def generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL1', turnado_id=No
     elements.append(Spacer(1, 8))
 
     # ── Prioridad ──
-    prioridad_bloque = [seccion('PRIORIDAD'), Spacer(1, 4), Paragraph(f'<b>{fus.prioridad or "—"}</b>', st_val)]
+    prioridad_bloque = [seccion('PRIORIDAD'), Spacer(1, 4), Paragraph(f'<b>{esc(fus.prioridad) if fus.prioridad else "—"}</b>', st_val)]
     if fus.criterios:
         prioridad_bloque.append(Spacer(1, 2))
         for crit in [c.strip() for c in fus.criterios.split('|') if c.strip()]:
-            prioridad_bloque.append(Paragraph(f'• {crit}', st_val))
+            prioridad_bloque.append(Paragraph(f'• {esc(crit)}', st_val))
     elements.append(KeepTogether(prioridad_bloque))
     elements.append(Spacer(1, 8))
 
@@ -805,7 +817,7 @@ def generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL1', turnado_id=No
             if respuestas_comisionado:
                 seg_rows = [
                     [Paragraph(s.fechaRegistro.strftime('%d/%m/%Y %H:%M'), st_val),
-                     Paragraph(f'<b>{TIPO_SEG_LABEL.get(s.tipo, s.tipo)}:</b> {s.contenido}', st_val)]
+                     Paragraph(f'<b>{TIPO_SEG_LABEL.get(s.tipo, s.tipo)}:</b> {esc(s.contenido)}', st_val)]
                     for s in respuestas_comisionado
                 ]
                 elements.append(KeepTogether([seccion('RESPUESTA Y SEGUIMIENTO'), Spacer(1, 4), _tabla_seg(seg_rows)]))
@@ -824,9 +836,9 @@ def generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL1', turnado_id=No
                     seg_rows = []
                     for s in segs:
                         fecha_str = s.fechaActividad.strftime('%d/%m/%Y') if s.fechaActividad else '—'
-                        texto = s.descripcionActividad or '—'
+                        texto = esc(s.descripcionActividad) if s.descripcionActividad else '—'
                         if s.accionTexto:
-                            texto += f'<br/>→ {s.accionTexto}'
+                            texto += f'<br/>→ {esc(s.accionTexto)}'
                         seg_rows.append([Paragraph(fecha_str, st_val), Paragraph(texto, st_val)])
                     bloque = [_tabla_seg(seg_rows)] if i > 0 else [seccion('RESPUESTA Y SEGUIMIENTO'), Spacer(1, 4), _tabla_seg(seg_rows)]
                     elements.append(KeepTogether(bloque))
@@ -864,17 +876,17 @@ def generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL1', turnado_id=No
                 propias = [s for s in t.seguimientos.all() if s.activo and _es_respuesta_real(s)]
                 seg_rows = [
                     [Paragraph(s.fechaActividad.strftime('%d/%m/%Y') if s.fechaActividad else '—', st_val),
-                     Paragraph((s.descripcionActividad or '—') + (f'<br/>→ {s.accionTexto}' if s.accionTexto else ''), st_val)]
+                     Paragraph((esc(s.descripcionActividad) if s.descripcionActividad else '—') + (f'<br/>→ {esc(s.accionTexto)}' if s.accionTexto else ''), st_val)]
                     for s in propias
                 ]
                 seg_rows += [
                     [Paragraph(s.fechaRegistro.strftime('%d/%m/%Y'), st_val),
-                     Paragraph(f'<b>{TIPO_SEG_LABEL.get(s.tipo, s.tipo)}:</b> {s.contenido}', st_val)]
+                     Paragraph(f'<b>{TIPO_SEG_LABEL.get(s.tipo, s.tipo)}:</b> {esc(s.contenido)}', st_val)]
                     for s in respuestas_comisionado
                 ]
                 if not seg_rows:
                     continue
-                bloque = [Paragraph(dest_nombre, st_lbl), Spacer(1, 2), _tabla_seg(seg_rows)]
+                bloque = [Paragraph(esc(dest_nombre), st_lbl), Spacer(1, 2), _tabla_seg(seg_rows)]
                 if not algun_bloque:
                     bloque = [seccion('RESPUESTA Y SEGUIMIENTO'), Spacer(1, 4)] + bloque
                     algun_bloque = True
@@ -915,7 +927,7 @@ def generar_pdf_fus(fus, incluir_imagenes=False, rol_visor='ROL1', turnado_id=No
             elements.append(HRFlowable(width='100%', thickness=2, color=VERDE, spaceAfter=12))
             max_w, max_h = W, 20*cm
             for ev, ruta_abs in rutas_validas:
-                elements.append(Paragraph(ev.nombreArchivo or '—', st_lbl))
+                elements.append(Paragraph(esc(ev.nombreArchivo) if ev.nombreArchivo else '—', st_lbl))
                 elements.append(Spacer(1, 4))
                 try:
                     img = RLImage(ruta_abs)
