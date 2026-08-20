@@ -22,3 +22,41 @@ services:
         sync: false
       - key: FRONTEND_URL
         sync: false
+      # Sin estas, EMAIL_BACKEND cae en el backend de consola (ver
+      # backend/settings.py) — el correo "se envía" pero solo queda impreso
+      # en el log de Render, nunca llega de verdad a la bandeja del
+      # destinatario. Necesarias para que verificar-correo (OTP), turnar,
+      # comisionar, atender y concluir un FUS notifiquen por correo real.
+      - key: EMAIL_BACKEND
+        sync: false
+      - key: EMAIL_HOST
+        sync: false
+      - key: EMAIL_PORT
+        sync: false
+      - key: EMAIL_USE_TLS
+        sync: false
+      - key: EMAIL_HOST_USER
+        sync: false
+      - key: EMAIL_HOST_PASSWORD
+        sync: false
+      - key: DEFAULT_FROM_EMAIL
+        sync: false
+      # Sin VAPID_PRIVATE_KEY, _enviar_web_push (services/notificaciones.py)
+      # regresa de inmediato sin mandar nada — con DEBUG=False no hay
+      # respaldo de desarrollo, así que en Render son obligatorias para que
+      # lleguen notificaciones del sistema operativo con la app/pestaña
+      # cerrada. Generar un par propio con `python manage.py
+      # generar_vapid_keys` (nunca reusar el par de otro ambiente).
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: VAPID_CLAIM_EMAIL
+        sync: false
+      # Opcional pero recomendado: sin ella, CHANNEL_LAYERS usa
+      # InMemoryChannelLayer (solo válido con un único proceso/worker) — con
+      # Redis, la campanita en vivo (WebSocket) y la cola de correos/push
+      # quedan compartidas de verdad entre procesos y sobreviven un reinicio
+      # del dyno, en vez de perder las suscripciones activas cada vez.
+      - key: REDIS_URL
+        sync: false
