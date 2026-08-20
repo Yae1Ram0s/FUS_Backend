@@ -74,9 +74,13 @@ class FUSSerializer(serializers.ModelSerializer):
 
     def get_estatusVisual(self, obj):
         """Con una sola persona, ROL1 ve en la tarjeta el estado de ese
-        turnado. Con varias personas se conserva el estado agregado del FUS."""
+        turnado — salvo 'Recibido', el estado inicial del Turnado antes de
+        que el Titular haga cualquier cosa: para ROL1 eso sigue siendo
+        simplemente "Turnado" (el estado agregado del FUS), no un estado
+        aparte que no significa nada nuevo todavía. Con varias personas se
+        conserva el estado agregado del FUS."""
         turnados_activos = [t for t in obj.turnados.all() if t.activo]
-        if len(turnados_activos) == 1:
+        if len(turnados_activos) == 1 and turnados_activos[0].estatusTitular_id != 'Recibido':
             return turnados_activos[0].estatusTitular_id
         return obj.estatusParticular_id
 
@@ -179,7 +183,7 @@ class SeguimientoRespuestaSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = SeguimientoRespuesta
-        fields = ['id', 'idFus', 'idAutor', 'tipo', 'contenido', 'fechaRegistro']
+        fields = ['id', 'idFus', 'idAutor', 'tipo', 'contenido', 'fechaActividad', 'accionTexto', 'fechaRegistro']
         read_only_fields = ['idFus', 'idAutor', 'fechaRegistro']
 
     def validate_contenido(self, value):
@@ -188,32 +192,40 @@ class SeguimientoRespuestaSerializer(serializers.ModelSerializer):
         return value
 
 
-class SeguimientoComisionadoCreateSerializer(SeguimientoRespuestaSerializer):
-    """POST seguimiento del Comisionado: restringe `tipo` a los valores que el
-    Comisionado puede reportar (la finalización/rechazo ya no las genera él,
-    las produce el flujo de atendido/validación) y valida que el FUS siga en
-    curso. 'En_seguimiento' = aún sin ninguna respuesta; 'Atendido' = ya tiene
-    al menos una; 'Rechazado' = el Particular la rechazó y esta respuesta es
-    la que la reabre directo a 'Atendido' (ver la vista). Todas admiten
-    seguir agregando respuestas. Requiere `fus` en el context."""
+class SeguimientoComisionadoCreateSerializer(serializers.Serializer):
+    """POST seguimiento del Comisionado — mismo criterio que el Seguimiento de
+    ROL2 sobre Turnado (ver Seguimientos en SolicitudesTurnadas.jsx): una
+    respuesta puede llevar solo descripción, solo acción por emprender, o
+    ambas juntas; se exige al menos una. `tipo` ('avance' vs
+    'accion_por_emprender') ya no lo elige el Comisionado a mano, se deduce
+    aquí según qué campo venga con contenido — la finalización/rechazo no las
+    genera este endpoint, las produce el flujo de atendido/validación. Valida
+    que el FUS siga en curso: 'En_seguimiento' = aún sin ninguna respuesta;
+    'Atendido' = ya tiene al menos una; 'Rechazado' = el Particular la
+    rechazó y esta respuesta es la que la reabre directo a 'Atendido' (ver la
+    vista). Todas admiten seguir agregando respuestas. Requiere `fus` en el
+    context."""
 
-    TIPOS_PERMITIDOS = ('accion_por_emprender', 'avance')
     ESTATUS_PERMITIDOS = ('En_seguimiento', 'Atendido', 'Rechazado')
 
-    class Meta(SeguimientoRespuestaSerializer.Meta):
-        fields = ['tipo', 'contenido']
-
-    def validate_tipo(self, value):
-        if value not in self.TIPOS_PERMITIDOS:
-            raise serializers.ValidationError('Tipo de seguimiento inválido.')
-        return value
+    fechaActividad        = serializers.DateField(required=False, allow_null=True)
+    descripcionActividad  = serializers.CharField(required=False, allow_blank=True, default='')
+    accionTexto           = serializers.CharField(required=False, allow_blank=True, max_length=500, default='')
 
     def validate(self, attrs):
+        descripcion = attrs['descripcionActividad'].strip()
+        accion = attrs['accionTexto'].strip()
+        if not descripcion and not accion:
+            raise serializers.ValidationError('Escribe una respuesta o una acción por emprender.')
+
         fus = self.context['fus']
         if fus.estatusParticular_id not in self.ESTATUS_PERMITIDOS:
             raise serializers.ValidationError(
                 'Solo se puede dar seguimiento mientras la solicitud está en seguimiento.'
             )
+
+        attrs['descripcionActividad'] = descripcion
+        attrs['accionTexto'] = accion
         return attrs
 
 

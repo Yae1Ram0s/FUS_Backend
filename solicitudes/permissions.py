@@ -74,15 +74,27 @@ class EsComisionado(BasePermission):
 
 
 class EsComisionadoAsignado(BasePermission):
-    """El Comisionado autenticado, solo sobre el FUS que tiene asignado.
+    """El Comisionado autenticado sobre el FUS que tiene asignado, o el Rol 2
+    destinatario del Turnado de ese mismo FUS ya comisionado — una vez que
+    Rol 2 delega en un Comisionado, ambos pueden registrar seguimiento sobre
+    ese FUS (Rol 2 no queda solo en modo lectura). No aplica a Rol 1: su
+    seguimiento sigue siendo exclusivo del Comisionado, y Rol 1 conserva el
+    rol de validación final (ver EsRol1DuenoDelFUS).
     Usado por: seguimiento (POST)."""
     message = 'No autorizado.'
 
     def has_permission(self, request, view):
-        return get_rol(request.user) == 'COMISIONADO'
+        return get_rol(request.user) in ('COMISIONADO', 'ROL2')
 
     def has_object_permission(self, request, view, obj):
-        return obj.idComisionado_id == request.user.id
+        rol = get_rol(request.user)
+        if rol == 'COMISIONADO':
+            return obj.idComisionado_id == request.user.id
+        if rol == 'ROL2':
+            return obj.idComisionado_id is not None and Turnado.objects.filter(
+                idFus=obj, idDestinatario=request.user, activo=1
+            ).exists()
+        return False
 
 
 class PuedeVerSeguimientoComisionado(BasePermission):

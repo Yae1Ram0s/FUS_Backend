@@ -416,6 +416,12 @@ class SeguimientoRespuesta(models.Model):
     )
     tipo = models.CharField(max_length=25, choices=TIPO_CHOICES)
     contenido = models.TextField()
+    fechaActividad = models.DateField(
+        null=True, blank=True, db_column='fecha_actividad',
+    )
+    accionTexto = models.CharField(
+        max_length=500, null=True, blank=True, db_column='accion_texto',
+    )
     fechaRegistro = models.DateTimeField(auto_now_add=True, db_column='fecha_registro')
     activo = models.SmallIntegerField(default=1)
 
