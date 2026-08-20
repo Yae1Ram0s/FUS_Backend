@@ -190,10 +190,21 @@ class SeguimientoComisionadoListCreateView(APIView):
 
         ser = SeguimientoComisionadoCreateSerializer(data=request.data, context={'fus': fus})
         ser.is_valid(raise_exception=True)
+        descripcion = ser.validated_data['descripcionActividad']
+        accion_texto = ser.validated_data['accionTexto']
+        fecha_actividad = ser.validated_data.get('fechaActividad')
 
         user = request.user
         with transaction.atomic():
-            seg = SeguimientoRespuesta.objects.create(idFus=fus, idAutor=user, **ser.validated_data)
+            # 'avance' si trae descripción (con o sin acción); si solo trae
+            # acción por emprender, el tag que se le muestra al Particular es
+            # 'accion_por_emprender' — mismo criterio de una sola etiqueta por
+            # entrada que ya usaba el selector manual que este flujo reemplaza.
+            tipo = 'avance' if descripcion else 'accion_por_emprender'
+            seg = SeguimientoRespuesta.objects.create(
+                idFus=fus, idAutor=user, tipo=tipo, contenido=descripcion,
+                accionTexto=accion_texto, fechaActividad=fecha_actividad,
+            )
 
             _log(usuario=user.email, rol=_rol(user), accion='SEGUIMIENTO_COMISIONADO',
                  ip=request.META.get('REMOTE_ADDR'), folio=fus.folio)
@@ -251,12 +262,28 @@ class SeguimientoComisionadoListCreateView(APIView):
                     t.idDestinatario for t in fus.turnados.filter(activo=1) if t.idDestinatario_id
                 }
                 destinatarios.discard(user)
+
+                # Si quien comisionó fue Rol 2 (el Titular delegó en vez de
+                # responder directo), el aviso a Rol 1 se firma con el nombre
+                # de ese Rol 2 en vez de "El comisionado" — de cara al
+                # Particular, el responsable sigue siendo el Titular que
+                # delegó, no la identidad interna del Comisionado. Si quien
+                # comisionó fue el propio Rol 1 (se comisiona a sí mismo un
+                # FUS que ya es suyo), no aplica: se quedaría notificando a
+                # alguien de su nombre propio.
+                comisionador = _quien_comisiono(fus)
+                mensaje = f"El comisionado atendió el FUS {fus.folio}."
+                if comisionador and _rol(comisionador) == 'ROL2':
+                    ca_comisiono = CorreoAutorizado.objects.filter(email=comisionador.email, activo=1).first()
+                    nombre_comisiono = ca_comisiono.nombre if ca_comisiono else (comisionador.first_name or comisionador.email)
+                    mensaje = f"{nombre_comisiono} comenzó a atender el FUS {fus.folio}."
+
                 notificaciones = [
                     Notificacion.objects.create(
                         idDestinatario=particular,
                         fusFolio=fus.folio,
                         tipoEvento='SEGUIMIENTO_FINALIZADO',
-                        mensaje=f"El comisionado atendió el FUS {fus.folio}.",
+                        mensaje=mensaje,
                     )
                     for particular in destinatarios
                 ]

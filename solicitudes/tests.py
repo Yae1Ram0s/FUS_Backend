@@ -722,6 +722,53 @@ class FiltroPendienteValidacionTests(APITestCase):
         self.assertNotIn(fus2.folio, folios)
 
 
+class EstatusVisualReciboNoSustituyeTurnadoTests(APITestCase):
+    """FUSSerializer.get_estatusVisual — con un solo Titular turnado que
+    todavía no ha hecho nada (Turnado.estatusTitular arranca en 'Recibido'),
+    la tarjeta de Rol 1 debe seguir mostrando "Turnado" (el estatus agregado
+    del FUS), no "Recibido": ese estado inicial no le dice nada nuevo a Rol 1
+    y se veía como si el sistema hubiera perdido el estatus real. En cuanto
+    el Titular avanza (aquí probado con 'En_seguimiento'), el passthrough al
+    estatus del turnado sigue aplicando normal."""
+
+    @classmethod
+    def setUpTestData(cls):
+        Estatus.objects.get_or_create(
+            clave='Registrado', defaults={'nombre': 'Registrado', 'tipoFlujo': 'PARTICULAR', 'orden': 1},
+        )
+        cls.medio = MedioRecepcion.objects.create(nombreMedio='Correo electrónico', paraTurnado=1)
+        cls.rol1 = User.objects.create_user(username='rol1f@t.mx', email='rol1f@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rol1f@t.mx', nombre='Rol1', rol='ROL1', activo=1)
+        cls.dest = User.objects.create_user(username='destf@t.mx', email='destf@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='destf@t.mx', nombre='Dest', rol='ROL2', activo=1)
+
+        cls.fus = FUS.objects.create(
+            folio='ANAM/PARTICULAR/FUS/0800/2026', idSolicitanteInterno=cls.rol1,
+            descripcion='x', contexto='', estatusParticular_id='Turnado',
+            idUsuarioRegistra=cls.rol1.id,
+        )
+        cls.turnado = Turnado.objects.create(
+            idFus=cls.fus, idRemitente=cls.rol1, idDestinatario=cls.dest,
+            idMedio=cls.medio, estatusTitular_id='Recibido', activo=1,
+        )
+
+    def test_recibido_muestra_turnado_no_recibido(self):
+        self.client.force_authenticate(user=self.rol1)
+        resp = self.client.get('/api/fus/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        item = next(r for r in resp.data['results'] if r['folio'] == self.fus.folio)
+        self.assertEqual(item['estatusVisual'], 'Turnado')
+
+    def test_en_seguimiento_sigue_pasando_directo(self):
+        self.turnado.estatusTitular_id = 'En_seguimiento'
+        self.turnado.save()
+        self.client.force_authenticate(user=self.rol1)
+        resp = self.client.get('/api/fus/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        item = next(r for r in resp.data['results'] if r['folio'] == self.fus.folio)
+        self.assertEqual(item['estatusVisual'], 'En_seguimiento')
+
+
 class SeguimientoComisionadoNotificaAlTitularTests(APITestCase):
     """SeguimientoComisionadoListCreateView.post — cuando el FUS llegó al
     comisionado vía un Turnado (el Titular lo delegó en vez de responder
@@ -756,7 +803,7 @@ class SeguimientoComisionadoNotificaAlTitularTests(APITestCase):
     def test_titular_recibe_notificacion_al_primer_avance_del_comisionado(self):
         self.client.force_authenticate(user=self.comisionado)
         resp = self.client.post(f'/api/fus/{self.fus.pk}/seguimiento/', {
-            'tipo': 'avance', 'contenido': 'Ya empecé a revisar el expediente.',
+            'descripcionActividad': 'Ya empecé a revisar el expediente.',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
 
@@ -817,6 +864,128 @@ class SeguimientoComisionadoNotificaAlDuenoEnOtraUnidadTests(APITestCase):
                 idDestinatario=self.rol1, fusFolio=self.fus.folio, tipoEvento='SEGUIMIENTO_FINALIZADO',
             ).exists()
         )
+
+
+class SeguimientoComisionadoPermiteTitularQueComisionoTests(APITestCase):
+    """SeguimientoComisionadoListCreateView.post — una vez que Rol 2 comisiona
+    un FUS, tanto el Comisionado asignado como ese mismo Rol 2 (destinatario
+    del Turnado) pueden registrar seguimiento; un Rol 2 ajeno a este FUS, y
+    Rol 1, siguen sin poder (ver EsComisionadoAsignado)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        Estatus.objects.get_or_create(
+            clave='Registrado', defaults={'nombre': 'Registrado', 'tipoFlujo': 'PARTICULAR', 'orden': 1},
+        )
+        cls.medio = MedioRecepcion.objects.create(nombreMedio='Correo electrónico', paraTurnado=1)
+        cls.rol1 = User.objects.create_user(username='rol1d@t.mx', email='rol1d@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rol1d@t.mx', nombre='Rol1', rol='ROL1', activo=1)
+        cls.rol2 = User.objects.create_user(username='rol2d@t.mx', email='rol2d@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rol2d@t.mx', nombre='Rol2', rol='ROL2', activo=1)
+        cls.otro_rol2 = User.objects.create_user(username='otro2d@t.mx', email='otro2d@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='otro2d@t.mx', nombre='Otro Rol2', rol='ROL2', activo=1)
+        cls.comisionado = User.objects.create_user(username='comid@t.mx', email='comid@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='comid@t.mx', nombre='Comi', rol='COMISIONADO', activo=1)
+
+        cls.fus = FUS.objects.create(
+            folio='ANAM/PARTICULAR/FUS/0702/2026', idSolicitanteInterno=cls.rol1,
+            descripcion='x', contexto='', estatusParticular_id='En_seguimiento',
+            idUsuarioRegistra=cls.rol1.id, idComisionado=cls.comisionado,
+        )
+        Turnado.objects.create(
+            idFus=cls.fus, idRemitente=cls.rol1, idDestinatario=cls.rol2,
+            idMedio=cls.medio, estatusTitular_id='En_seguimiento', activo=1,
+        )
+
+    def test_rol2_destinatario_puede_agregar_seguimiento(self):
+        self.client.force_authenticate(user=self.rol2)
+        resp = self.client.post(f'/api/fus/{self.fus.pk}/seguimiento/', {
+            'descripcionActividad': 'Ya hablé con el área.',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+
+    def test_comisionado_sigue_pudiendo_agregar_seguimiento(self):
+        self.client.force_authenticate(user=self.comisionado)
+        resp = self.client.post(f'/api/fus/{self.fus.pk}/seguimiento/', {
+            'descripcionActividad': 'Reviso el expediente.',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+
+    def test_rol2_ajeno_a_este_fus_no_puede_agregar_seguimiento(self):
+        self.client.force_authenticate(user=self.otro_rol2)
+        resp = self.client.post(f'/api/fus/{self.fus.pk}/seguimiento/', {
+            'descripcionActividad': 'No debería poder.',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN, resp.data)
+
+    def test_rol1_no_puede_agregar_seguimiento(self):
+        self.client.force_authenticate(user=self.rol1)
+        resp = self.client.post(f'/api/fus/{self.fus.pk}/seguimiento/', {
+            'descripcionActividad': 'No debería poder.',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN, resp.data)
+
+    def test_solo_accion_por_emprender_se_acepta_y_clasifica_como_tal(self):
+        self.client.force_authenticate(user=self.comisionado)
+        resp = self.client.post(f'/api/fus/{self.fus.pk}/seguimiento/', {
+            'accionTexto': 'Solicitar el expediente físico.',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['tipo'], 'accion_por_emprender')
+        self.assertEqual(resp.data['accionTexto'], 'Solicitar el expediente físico.')
+
+    def test_seguimiento_vacio_se_rechaza(self):
+        self.client.force_authenticate(user=self.comisionado)
+        resp = self.client.post(f'/api/fus/{self.fus.pk}/seguimiento/', {}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+
+
+class SeguimientoComisionadoNotificaConNombreDeRol2Tests(APITestCase):
+    """SeguimientoComisionadoListCreateView.post — cuando quien ejecutó
+    "comisionar" fue Rol 2 (no Rol 1), el primer avance del Comisionado
+    notifica a Rol 1 firmado con el nombre de ese Rol 2 ("Ana Titular
+    comenzó a atender..."), no con el genérico "El comisionado..." — de cara
+    al Particular, el responsable visible sigue siendo el Titular que
+    delegó."""
+
+    @classmethod
+    def setUpTestData(cls):
+        Estatus.objects.get_or_create(
+            clave='Registrado', defaults={'nombre': 'Registrado', 'tipoFlujo': 'PARTICULAR', 'orden': 1},
+        )
+        cls.medio = MedioRecepcion.objects.create(nombreMedio='Correo electrónico', paraTurnado=1)
+        cls.rol1 = User.objects.create_user(username='rol1e@t.mx', email='rol1e@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rol1e@t.mx', nombre='Rol1', rol='ROL1', activo=1)
+        cls.rol2 = User.objects.create_user(username='rol2e@t.mx', email='rol2e@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rol2e@t.mx', nombre='Ana Titular', rol='ROL2', activo=1)
+        cls.comisionado = User.objects.create_user(username='comie@t.mx', email='comie@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='comie@t.mx', nombre='Comi', rol='COMISIONADO', activo=1)
+
+        cls.fus = FUS.objects.create(
+            folio='ANAM/PARTICULAR/FUS/0703/2026', idSolicitanteInterno=cls.rol1,
+            descripcion='x', contexto='', estatusParticular_id='Turnado',
+            idUsuarioRegistra=cls.rol1.id,
+        )
+        Turnado.objects.create(
+            idFus=cls.fus, idRemitente=cls.rol1, idDestinatario=cls.rol2,
+            idMedio=cls.medio, estatusTitular_id='Recibido', activo=1,
+        )
+
+    def test_mensaje_usa_el_nombre_de_rol2_que_comisiono(self):
+        self.client.force_authenticate(user=self.rol2)
+        resp = self.client.post(f'/api/fus/{self.fus.pk}/comisionar/', {
+            'comisionado_id': self.comisionado.id,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+
+        self.client.force_authenticate(user=self.comisionado)
+        resp = self.client.post(f'/api/fus/{self.fus.pk}/seguimiento/', {
+            'descripcionActividad': 'Ya empecé a revisar el expediente.',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+
+        notif = Notificacion.objects.get(idDestinatario=self.rol1, fusFolio=self.fus.folio)
+        self.assertIn('Ana Titular comenzó a atender el FUS', notif.mensaje)
 
 
 class AtendidoFUSNotificaAlTitularTests(APITestCase):
