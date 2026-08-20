@@ -11,7 +11,7 @@ from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 
 from autenticacion.models import CorreoAutorizado
-from catalogos.models import MedioRecepcion
+from catalogos.models import MedioRecepcion, Estatus
 from ..models import FUS, Turnado, Seguimiento, Notificacion, Actividad, Bitacora, SeguimientoRespuesta
 from ..serializers import (
     TurnadoSerializer, TurnadoActividadSerializer, SeguimientoSerializer,
@@ -375,6 +375,30 @@ class FUSTrazabilidadView(APIView):
 
 # ── Turnados (ROL2) ──────────────────────────────────────────────────────────
 
+def _q_estatus_titular_turnado(clave):
+    """Arma el Q() de un solo estatus/temporalidad para Turnado.estatusTitular
+    — factorizado de MisTurnadosView.get para reusarlo tal cual al filtrar
+    (varios claves con OR) y al calcular los conteos por chip (uno a la vez,
+    sobre el queryset sin el propio filtro de estatus/prioridad aplicado)."""
+    if clave == 'Vencido':
+        # Indicador de temporalidad, no de estatus: por fechaLimite, sin
+        # importar en qué estatus del trámite esté el FUS — salvo Concluido,
+        # ya cerrado, donde la temporalidad deja de aplicar (mismo criterio
+        # que FUSSerializer.get_estadoTemporalidad).
+        return Q(idFus__fechaLimite__lt=timezone.now()) & ~Q(idFus__estatusParticular_id='Concluido')
+    if clave == 'PorVencer':
+        from datetime import timedelta
+        ahora = timezone.now()
+        return Q(
+            idFus__fechaLimite__gte=ahora, idFus__fechaLimite__lte=ahora + timedelta(hours=24),
+        ) & ~Q(idFus__estatusParticular_id='Concluido')
+    if clave in ('Rechazado', 'Pendiente_validacion'):
+        # Viven en FUS.estatusParticular, no en Turnado.estatusTitular — el
+        # sidebar de ROL2 los ofrece bajo el mismo parámetro `estatusTitular`.
+        return Q(idFus__estatusParticular_id=clave)
+    return Q(estatusTitular_id=clave)
+
+
 class MisTurnadosView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -395,33 +419,6 @@ class MisTurnadosView(APIView):
             # Se filtra antes de paginar para que el detalle pueda abrirse
             # aunque el turnado no esté entre los primeros resultados.
             qs = qs.filter(idFus__folio=folio)
-        if prioridad:
-            qs = qs.filter(idFus__prioridad=prioridad)
-        if estatus_raw:
-            # Uno o varios chips a la vez (ej. "Recibido,En_seguimiento") — se
-            # combinan con OR, ya que un turnado solo puede estar en un
-            # estatus: seleccionar varios amplía la bandeja, no la reduce.
-            q_estatus = Q()
-            for estatus in {e.strip() for e in estatus_raw.split(',') if e.strip()}:
-                if estatus == 'Vencido':
-                    # Indicador de temporalidad, no de estatus: por fechaLimite,
-                    # sin importar en qué estatus del trámite esté el FUS — salvo
-                    # Concluido, ya cerrado, donde la temporalidad deja de aplicar
-                    # (mismo criterio que FUSSerializer.get_estadoTemporalidad).
-                    q_estatus |= Q(idFus__fechaLimite__lt=timezone.now()) & ~Q(idFus__estatusParticular_id='Concluido')
-                elif estatus == 'PorVencer':
-                    from datetime import timedelta
-                    ahora = timezone.now()
-                    q_estatus |= Q(
-                        idFus__fechaLimite__gte=ahora, idFus__fechaLimite__lte=ahora + timedelta(hours=24),
-                    ) & ~Q(idFus__estatusParticular_id='Concluido')
-                elif estatus in ('Rechazado', 'Pendiente_validacion'):
-                    # Viven en FUS.estatusParticular, no en Turnado.estatusTitular —
-                    # el sidebar de ROL2 los ofrece bajo el mismo parámetro `estatusTitular`.
-                    q_estatus |= Q(idFus__estatusParticular_id=estatus)
-                else:
-                    q_estatus |= Q(estatusTitular_id=estatus)
-            qs = qs.filter(q_estatus)
         if search:
             emails_nombre = list(CorreoAutorizado.objects.filter(nombre__icontains=search).values_list('email', flat=True))
             qs = qs.filter(
@@ -448,6 +445,41 @@ class MisTurnadosView(APIView):
                 Q(seguimientos__accionTexto__icontains=search)
             ).distinct()
 
+        # Snapshot previo a los filtros de chip (estatus/prioridad): de aquí
+        # salen los conteos por chip que ve el frontend — si se calcularan
+        # sobre `qs` ya filtrado por el chip activo, los DEMÁS chips
+        # mostrarían siempre 0 en cuanto se selecciona uno (justo el bug
+        # reportado). Sí respeta folio/search/scope de rol, para que los
+        # conteos coincidan con la bandeja que el usuario está viendo.
+        qs_sin_chip = qs
+
+        # Mismos chips que arma SolicitudesTurnadas.jsx (useEstatus('TITULAR'),
+        # que en el backend trae TITULAR + AMBOS — ver EstatusListView) más
+        # Pendiente_validacion/Rechazado (viven en FUS, no en el catálogo
+        # TITULAR) y las dos temporalidades.
+        claves_chip = ['Pendiente_validacion', 'Rechazado', 'Vencido', 'PorVencer'] + list(
+            Estatus.objects.filter(tipoFlujo__in=['TITULAR', 'AMBOS'], activa=True).values_list('clave', flat=True)
+        )
+        conteos_estatus = {
+            clave: qs_sin_chip.filter(_q_estatus_titular_turnado(clave)).count()
+            for clave in claves_chip
+        }
+        conteos_prioridad = {
+            valor: qs_sin_chip.filter(idFus__prioridad=valor).count()
+            for valor in ('Alta', 'Media', 'Baja')
+        }
+
+        if prioridad:
+            qs = qs.filter(idFus__prioridad=prioridad)
+        if estatus_raw:
+            # Uno o varios chips a la vez (ej. "Recibido,En_seguimiento") — se
+            # combinan con OR, ya que un turnado solo puede estar en un
+            # estatus: seleccionar varios amplía la bandeja, no la reduce.
+            q_estatus = Q()
+            for estatus in {e.strip() for e in estatus_raw.split(',') if e.strip()}:
+                q_estatus |= _q_estatus_titular_turnado(estatus)
+            qs = qs.filter(q_estatus)
+
         qs = qs.order_by('-fechaRegistro')
 
         # Paginación
@@ -462,7 +494,10 @@ class MisTurnadosView(APIView):
         pagina = list(qs[offset: offset + page_size])
         mapa   = mapa_correos_autorizados(emails_de_turnados(pagina))
         data   = TurnadoSerializer(pagina, many=True, context={'mapa_correos': mapa}).data
-        return Response({'total': total, 'page': page, 'page_size': page_size, 'results': data})
+        return Response({
+            'total': total, 'page': page, 'page_size': page_size, 'results': data,
+            'conteos': {'estatus': conteos_estatus, 'prioridad': conteos_prioridad},
+        })
 
 
 class MarcarTurnadoAtendidoView(APIView):

@@ -722,6 +722,75 @@ class FiltroPendienteValidacionTests(APITestCase):
         self.assertNotIn(fus2.folio, folios)
 
 
+class ConteosPorChipNoDependenDelFiltroActivoTests(APITestCase):
+    """FUSListCreateView / MisTurnadosView — el número que se muestra junto a
+    cada chip debe reflejar TODA la bandeja (mismo search/scope), no solo lo
+    que ya trae aplicado el chip seleccionado: antes `conteoEstatus` se
+    calculaba en el frontend sobre `lista`, que el backend ya devolvía
+    filtrada por el chip activo, así que en cuanto se elegía uno los demás
+    chips se veían en 0 aunque sí hubiera resultados."""
+
+    @classmethod
+    def setUpTestData(cls):
+        Estatus.objects.get_or_create(
+            clave='Registrado', defaults={'nombre': 'Registrado', 'tipoFlujo': 'PARTICULAR', 'orden': 1},
+        )
+        cls.medio = MedioRecepcion.objects.create(nombreMedio='Correo electrónico', paraTurnado=1)
+        cls.rol1 = User.objects.create_user(username='rol1g@t.mx', email='rol1g@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rol1g@t.mx', nombre='Rol1', rol='ROL1', activo=1)
+        cls.rol2 = User.objects.create_user(username='rol2g@t.mx', email='rol2g@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rol2g@t.mx', nombre='Rol2', rol='ROL2', activo=1)
+
+        cls.fus_registrado = FUS.objects.create(
+            folio='ANAM/PARTICULAR/FUS/0900/2026', idSolicitanteInterno=cls.rol1,
+            descripcion='x', contexto='', estatusParticular_id='Registrado',
+            idUsuarioRegistra=cls.rol1.id,
+        )
+        cls.fus_turnado = FUS.objects.create(
+            folio='ANAM/PARTICULAR/FUS/0901/2026', idSolicitanteInterno=cls.rol1,
+            descripcion='x', contexto='', estatusParticular_id='Turnado',
+            idUsuarioRegistra=cls.rol1.id,
+        )
+        cls.turnado = Turnado.objects.create(
+            idFus=cls.fus_turnado, idRemitente=cls.rol1, idDestinatario=cls.rol2,
+            idMedio=cls.medio, estatusTitular_id='Recibido', activo=1,
+        )
+
+    def test_fus_conteos_no_se_reducen_al_chip_activo(self):
+        self.client.force_authenticate(user=self.rol1)
+        resp = self.client.get('/api/fus/', {'estatusParticular': 'Turnado'})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        folios = {item['folio'] for item in resp.data['results']}
+        self.assertEqual(folios, {self.fus_turnado.folio})
+
+        conteos = resp.data['conteos']['estatus']
+        self.assertEqual(conteos['Registrado'], 1)
+        self.assertEqual(conteos['Turnado'], 1)
+
+    def test_turnados_conteos_no_se_reducen_al_chip_activo(self):
+        # Un segundo turnado 'En_seguimiento' para tener dos claves distintas
+        # en la bandeja de ROL2 y confirmar que el chip inactivo ('Recibido')
+        # sigue contando aunque el filtro activo sea 'En_seguimiento'.
+        fus3 = FUS.objects.create(
+            folio='ANAM/PARTICULAR/FUS/0902/2026', idSolicitanteInterno=self.rol1,
+            descripcion='x', contexto='', estatusParticular_id='En_seguimiento',
+            idUsuarioRegistra=self.rol1.id,
+        )
+        Turnado.objects.create(
+            idFus=fus3, idRemitente=self.rol1, idDestinatario=self.rol2,
+            idMedio=self.medio, estatusTitular_id='En_seguimiento', activo=1,
+        )
+        self.client.force_authenticate(user=self.rol2)
+        resp = self.client.get('/api/turnados/mis-turnados/', {'estatusTitular': 'En_seguimiento'})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        folios = {item['idFus']['folio'] for item in resp.data['results']}
+        self.assertEqual(folios, {fus3.folio})
+
+        conteos = resp.data['conteos']['estatus']
+        self.assertEqual(conteos['Recibido'], 1)
+        self.assertEqual(conteos['En_seguimiento'], 1)
+
+
 class EstatusVisualReciboNoSustituyeTurnadoTests(APITestCase):
     """FUSSerializer.get_estatusVisual — con un solo Titular turnado que
     todavía no ha hecho nada (Turnado.estatusTitular arranca en 'Recibido'),
@@ -1766,3 +1835,183 @@ class NotificarPorCorreoTests(APITestCase):
 
         mock_cargar.assert_called_once_with(fus.folio)
         self.assertEqual(MockEmail.call_count, 2)
+
+
+class TodosLosChipsConsultarFUSFiltranCorrectoTests(APITestCase):
+    """FUSListCreateView — verifica, uno por uno, que cada chip de Consultar
+    FUS (Rol 1) devuelve exactamente el FUS que le corresponde y ninguno de
+    los demás: Registrado, Turnado, Atendido ("En seguimiento"), Concluido,
+    Pendiente_validacion ("Por validar"), Vencido, Por vencer, combinación de
+    varios chips a la vez (OR) y Prioridad."""
+
+    @classmethod
+    def setUpTestData(cls):
+        Estatus.objects.get_or_create(
+            clave='Registrado', defaults={'nombre': 'Registrado', 'tipoFlujo': 'PARTICULAR', 'orden': 1},
+        )
+        cls.rol1 = User.objects.create_user(username='chipsrol1@t.mx', email='chipsrol1@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='chipsrol1@t.mx', nombre='Rol1', rol='ROL1', activo=1)
+
+        ahora = timezone.now()
+
+        def crear(folio, estatus, prioridad='Media', fecha_limite=None):
+            return FUS.objects.create(
+                folio=folio, idSolicitanteInterno=cls.rol1, descripcion='x', contexto='',
+                estatusParticular_id=estatus, idUsuarioRegistra=cls.rol1.id,
+                prioridad=prioridad, fechaLimite=fecha_limite,
+            )
+
+        cls.f_registrado = crear('ANAM/PARTICULAR/FUS/1000/2026', 'Registrado', prioridad='Alta')
+        cls.f_turnado    = crear('ANAM/PARTICULAR/FUS/1001/2026', 'Turnado', prioridad='Media')
+        cls.f_atendido   = crear('ANAM/PARTICULAR/FUS/1002/2026', 'Atendido', prioridad='Baja')
+        cls.f_concluido  = crear('ANAM/PARTICULAR/FUS/1003/2026', 'Concluido')
+        cls.f_validar    = crear('ANAM/PARTICULAR/FUS/1004/2026', 'Pendiente_validacion')
+        cls.f_vencido    = crear('ANAM/PARTICULAR/FUS/1005/2026', 'Turnado', fecha_limite=ahora - timedelta(days=1))
+        cls.f_por_vencer = crear('ANAM/PARTICULAR/FUS/1006/2026', 'Turnado', fecha_limite=ahora + timedelta(hours=5))
+        # Vencido pero Concluido: la temporalidad deja de aplicar una vez cerrado.
+        cls.f_concl_venc = crear('ANAM/PARTICULAR/FUS/1007/2026', 'Concluido', fecha_limite=ahora - timedelta(days=3))
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.rol1)
+
+    def _folios(self, **params):
+        resp = self.client.get('/api/fus/', params)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        return {item['folio'] for item in resp.data['results']}
+
+    def test_chip_registrado(self):
+        self.assertEqual(self._folios(estatusParticular='Registrado'), {self.f_registrado.folio})
+
+    def test_chip_turnado(self):
+        # Turnado también lo tienen f_vencido y f_por_vencer (ambos en
+        # estatusParticular='Turnado', solo cambia su fechaLimite).
+        self.assertEqual(
+            self._folios(estatusParticular='Turnado'),
+            {self.f_turnado.folio, self.f_vencido.folio, self.f_por_vencer.folio},
+        )
+
+    def test_chip_atendido_en_seguimiento(self):
+        self.assertEqual(self._folios(estatusParticular='Atendido'), {self.f_atendido.folio})
+
+    def test_chip_concluido(self):
+        self.assertEqual(
+            self._folios(estatusParticular='Concluido'),
+            {self.f_concluido.folio, self.f_concl_venc.folio},
+        )
+
+    def test_chip_por_validar(self):
+        self.assertEqual(self._folios(estatusParticular='Pendiente_validacion'), {self.f_validar.folio})
+
+    def test_chip_vencido(self):
+        # f_concl_venc tiene fechaLimite vencida pero está Concluido: no cuenta.
+        self.assertEqual(self._folios(estatusParticular='Vencido'), {self.f_vencido.folio})
+
+    def test_chip_por_vencer(self):
+        self.assertEqual(self._folios(estatusParticular='PorVencer'), {self.f_por_vencer.folio})
+
+    def test_varios_chips_de_estatus_se_combinan_con_or(self):
+        self.assertEqual(
+            self._folios(estatusParticular='Registrado,Concluido'),
+            {self.f_registrado.folio, self.f_concluido.folio, self.f_concl_venc.folio},
+        )
+
+    def test_chip_prioridad(self):
+        self.assertEqual(self._folios(prioridad='Alta'), {self.f_registrado.folio})
+        self.assertEqual(self._folios(prioridad='Baja'), {self.f_atendido.folio})
+
+    def test_conteos_coinciden_con_lo_que_cada_chip_realmente_devuelve(self):
+        # Con un chip de estatus activo, el conteo de CADA chip (incluidos
+        # los que no están seleccionados) debe ser igual a lo que ese chip
+        # devolvería si se seleccionara solo.
+        resp = self.client.get('/api/fus/', {'estatusParticular': 'Registrado'})
+        conteos = resp.data['conteos']['estatus']
+        for clave in ('Registrado', 'Turnado', 'Atendido', 'Concluido', 'Pendiente_validacion', 'Vencido', 'PorVencer'):
+            with self.subTest(clave=clave):
+                self.assertEqual(conteos[clave], len(self._folios(estatusParticular=clave)))
+
+
+class TodosLosChipsSolicitudesTurnadasFiltranCorrectoTests(APITestCase):
+    """MisTurnadosView — mismo objetivo que el test anterior, pero del lado
+    de Rol 2: Recibido, En_seguimiento, Concluido, Pendiente_validacion /
+    Rechazado (viven en FUS.estatusParticular, no en Turnado.estatusTitular),
+    Vencido, Por vencer y Prioridad."""
+
+    @classmethod
+    def setUpTestData(cls):
+        Estatus.objects.get_or_create(
+            clave='Registrado', defaults={'nombre': 'Registrado', 'tipoFlujo': 'PARTICULAR', 'orden': 1},
+        )
+        cls.medio = MedioRecepcion.objects.create(nombreMedio='Correo electrónico', paraTurnado=1)
+        cls.rol1 = User.objects.create_user(username='chipsrol1b@t.mx', email='chipsrol1b@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='chipsrol1b@t.mx', nombre='Rol1', rol='ROL1', activo=1)
+        cls.rol2 = User.objects.create_user(username='chipsrol2b@t.mx', email='chipsrol2b@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='chipsrol2b@t.mx', nombre='Rol2', rol='ROL2', activo=1)
+
+        ahora = timezone.now()
+
+        def crear_turnado(folio, estatus_fus, estatus_titular, prioridad='Media', fecha_limite=None):
+            fus = FUS.objects.create(
+                folio=folio, idSolicitanteInterno=cls.rol1, descripcion='x', contexto='',
+                estatusParticular_id=estatus_fus, idUsuarioRegistra=cls.rol1.id,
+                prioridad=prioridad, fechaLimite=fecha_limite,
+            )
+            return Turnado.objects.create(
+                idFus=fus, idRemitente=cls.rol1, idDestinatario=cls.rol2,
+                idMedio=cls.medio, estatusTitular_id=estatus_titular, activo=1,
+            )
+
+        cls.t_recibido    = crear_turnado('ANAM/PARTICULAR/FUS/1100/2026', 'Turnado', 'Recibido', prioridad='Alta')
+        cls.t_seguimiento = crear_turnado('ANAM/PARTICULAR/FUS/1101/2026', 'En_seguimiento', 'En_seguimiento', prioridad='Baja')
+        cls.t_concluido   = crear_turnado('ANAM/PARTICULAR/FUS/1102/2026', 'Concluido', 'Concluido')
+        cls.t_validar     = crear_turnado('ANAM/PARTICULAR/FUS/1103/2026', 'Pendiente_validacion', 'Pendiente_validacion')
+        cls.t_rechazado   = crear_turnado('ANAM/PARTICULAR/FUS/1104/2026', 'Rechazado', 'Rechazado')
+        cls.t_vencido     = crear_turnado(
+            'ANAM/PARTICULAR/FUS/1105/2026', 'Turnado', 'Recibido', fecha_limite=ahora - timedelta(days=1),
+        )
+        cls.t_por_vencer  = crear_turnado(
+            'ANAM/PARTICULAR/FUS/1106/2026', 'Turnado', 'Recibido', fecha_limite=ahora + timedelta(hours=5),
+        )
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.rol2)
+
+    def _folios(self, **params):
+        resp = self.client.get('/api/turnados/mis-turnados/', params)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        return {item['idFus']['folio'] for item in resp.data['results']}
+
+    def test_chip_recibido(self):
+        # Recibido también lo tienen t_vencido y t_por_vencer.
+        self.assertEqual(
+            self._folios(estatusTitular='Recibido'),
+            {self.t_recibido.idFus.folio, self.t_vencido.idFus.folio, self.t_por_vencer.idFus.folio},
+        )
+
+    def test_chip_en_seguimiento(self):
+        self.assertEqual(self._folios(estatusTitular='En_seguimiento'), {self.t_seguimiento.idFus.folio})
+
+    def test_chip_concluido(self):
+        self.assertEqual(self._folios(estatusTitular='Concluido'), {self.t_concluido.idFus.folio})
+
+    def test_chip_pendiente_validacion(self):
+        self.assertEqual(self._folios(estatusTitular='Pendiente_validacion'), {self.t_validar.idFus.folio})
+
+    def test_chip_rechazado(self):
+        self.assertEqual(self._folios(estatusTitular='Rechazado'), {self.t_rechazado.idFus.folio})
+
+    def test_chip_vencido(self):
+        self.assertEqual(self._folios(estatusTitular='Vencido'), {self.t_vencido.idFus.folio})
+
+    def test_chip_por_vencer(self):
+        self.assertEqual(self._folios(estatusTitular='PorVencer'), {self.t_por_vencer.idFus.folio})
+
+    def test_chip_prioridad(self):
+        self.assertEqual(self._folios(prioridad='Alta'), {self.t_recibido.idFus.folio})
+        self.assertEqual(self._folios(prioridad='Baja'), {self.t_seguimiento.idFus.folio})
+
+    def test_conteos_coinciden_con_lo_que_cada_chip_realmente_devuelve(self):
+        resp = self.client.get('/api/turnados/mis-turnados/', {'estatusTitular': 'Recibido'})
+        conteos = resp.data['conteos']['estatus']
+        for clave in ('Recibido', 'En_seguimiento', 'Concluido', 'Pendiente_validacion', 'Rechazado', 'Vencido', 'PorVencer'):
+            with self.subTest(clave=clave):
+                self.assertEqual(conteos[clave], len(self._folios(estatusTitular=clave)))

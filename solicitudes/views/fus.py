@@ -16,7 +16,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 
 from autenticacion.models import CorreoAutorizado
-from catalogos.models import MedioRecepcion
+from catalogos.models import MedioRecepcion, Estatus
 from ..models import FUS, Evidencia, Turnado, Actividad, SeguimientoRespuesta
 from ..serializers import FUSSerializer
 from ..services import generar_folio, guardar_evidencias, eliminar_evidencias
@@ -34,6 +34,46 @@ _FULLTEXT_OPERADORES = re.compile(r'[+\-><()~*"@]')
 # innodb_ft_min_token_size por defecto en MySQL/InnoDB — palabras más cortas
 # no están en el índice FULLTEXT y MATCH() nunca las encuentra.
 _FULLTEXT_MIN_TOKEN = 3
+
+
+def _q_estatus_particular_fus(clave):
+    """Arma el Q() de un solo estatus/temporalidad para FUS.estatusParticular
+    — factorizado de FUSListCreateView.get para reusarlo tal cual al filtrar
+    (varios claves con OR) y al calcular los conteos por chip (uno a la vez,
+    sobre el queryset sin el propio filtro de estatus/prioridad aplicado)."""
+    if clave == 'Vencido':
+        # Indicador de temporalidad, no de estatus: por fechaLimite, sin
+        # importar en qué estatus del trámite esté el FUS — salvo Concluido,
+        # ya cerrado, donde la temporalidad deja de aplicar (mismo criterio
+        # que FUSSerializer.get_estadoTemporalidad).
+        return Q(fechaLimite__lt=timezone.now()) & ~Q(estatusParticular_id='Concluido')
+    if clave == 'PorVencer':
+        from datetime import timedelta
+        ahora = timezone.now()
+        return Q(
+            fechaLimite__gte=ahora, fechaLimite__lte=ahora + timedelta(hours=24),
+        ) & ~Q(estatusParticular_id='Concluido')
+    if clave == 'Pendiente_validacion':
+        # Con un solo Titular turnado (sin comisionar), marcar "Atendido"
+        # deja fus.estatusParticular en 'Atendido' — el que de verdad pasa a
+        # 'Pendiente_validacion' es ese turnado (MarcarTurnadoAtendidoView,
+        # turnado.py), porque con varias personas "Atendido" no implica que
+        # todas ya estén listas. La tarjeta ya refleja esto mostrando el
+        # estatus del turnado cuando es el único activo
+        # (FUSSerializer.get_estatusVisual) — este filtro necesita el mismo
+        # criterio, o "Por validar" nunca encuentra esos FUS aunque la
+        # tarjeta sí diga "Por validar".
+        fus_un_turnado = (
+            Turnado.objects.filter(activo=1)
+            .values('idFus_id').annotate(n=Count('id')).filter(n=1)
+            .values('idFus_id')
+        )
+        fus_un_turnado_pendiente = Turnado.objects.filter(
+            activo=1, estatusTitular_id='Pendiente_validacion',
+            idFus_id__in=fus_un_turnado,
+        ).values('idFus_id')
+        return Q(estatusParticular_id='Pendiente_validacion') | Q(pk__in=fus_un_turnado_pendiente)
+    return Q(estatusParticular_id=clave)
 
 
 def _termino_fulltext_booleano(search):
@@ -78,52 +118,6 @@ class FUSListCreateView(APIView):
             # paginar para que el FUS se encuentre aunque no esté entre los
             # más recientes de la bandeja.
             qs = qs.filter(folio=folio)
-        if prioridad:
-            qs = qs.filter(prioridad=prioridad)
-        if estatus_raw:
-            # Uno o varios chips a la vez (ej. "Registrado,Turnado") — se
-            # combinan con OR, ya que un FUS solo puede estar en un estatus:
-            # seleccionar varios amplía la bandeja, no la reduce a la
-            # intersección (que siempre daría vacío salvo Vencido/PorVencer,
-            # que son temporalidad y sí pueden convivir con un estatus).
-            q_estatus = Q()
-            for estatus in {e.strip() for e in estatus_raw.split(',') if e.strip()}:
-                if estatus == 'Vencido':
-                    # Indicador de temporalidad, no de estatus: por fechaLimite,
-                    # sin importar en qué estatus del trámite esté el FUS — salvo
-                    # Concluido, ya cerrado, donde la temporalidad deja de aplicar
-                    # (mismo criterio que FUSSerializer.get_estadoTemporalidad).
-                    q_estatus |= Q(fechaLimite__lt=timezone.now()) & ~Q(estatusParticular_id='Concluido')
-                elif estatus == 'PorVencer':
-                    from datetime import timedelta
-                    ahora = timezone.now()
-                    q_estatus |= Q(
-                        fechaLimite__gte=ahora, fechaLimite__lte=ahora + timedelta(hours=24),
-                    ) & ~Q(estatusParticular_id='Concluido')
-                elif estatus == 'Pendiente_validacion':
-                    # Con un solo Titular turnado (sin comisionar), marcar
-                    # "Atendido" deja fus.estatusParticular en 'Atendido' —
-                    # el que de verdad pasa a 'Pendiente_validacion' es ese
-                    # turnado (MarcarTurnadoAtendidoView, turnado.py), porque
-                    # con varias personas "Atendido" no implica que todas ya
-                    # estén listas. La tarjeta ya refleja esto mostrando el
-                    # estatus del turnado cuando es el único activo
-                    # (FUSSerializer.get_estatusVisual) — este filtro necesita
-                    # el mismo criterio, o "Por validar" nunca encuentra esos
-                    # FUS aunque la tarjeta sí diga "Por validar".
-                    fus_un_turnado = (
-                        Turnado.objects.filter(activo=1)
-                        .values('idFus_id').annotate(n=Count('id')).filter(n=1)
-                        .values('idFus_id')
-                    )
-                    fus_un_turnado_pendiente = Turnado.objects.filter(
-                        activo=1, estatusTitular_id='Pendiente_validacion',
-                        idFus_id__in=fus_un_turnado,
-                    ).values('idFus_id')
-                    q_estatus |= Q(estatusParticular_id='Pendiente_validacion') | Q(pk__in=fus_un_turnado_pendiente)
-                else:
-                    q_estatus |= Q(estatusParticular_id=estatus)
-            qs = qs.filter(q_estatus)
         if search:
             emails_nombre = list(CorreoAutorizado.objects.filter(nombre__icontains=search).values_list('email', flat=True))
             # Columnas sin índice FULLTEXT (campos cortos/estructurados,
@@ -195,6 +189,44 @@ class FUSListCreateView(APIView):
                 )
             qs = qs.filter(condiciones).distinct()
 
+        # Snapshot previo a los filtros de chip (estatus/prioridad): de aquí
+        # salen los conteos por chip que ve el frontend — si se calcularan
+        # sobre `qs` ya filtrado por el chip activo, los DEMÁS chips
+        # mostrarían siempre 0 en cuanto se selecciona uno (justo el bug
+        # reportado). Sí respeta folio/search/scope de rol, para que los
+        # conteos coincidan con la bandeja que el usuario está viendo.
+        qs_sin_chip = qs
+
+        # Mismos chips que arma ConsultarFUS.jsx (useEstatus('PARTICULAR'),
+        # que en el backend trae PARTICULAR + AMBOS — ver EstatusListView):
+        # catálogo activo de esos dos tipos, sin "Rechazado" (ahí no se
+        # ofrece), más las dos temporalidades.
+        claves_chip = list(
+            Estatus.objects.filter(tipoFlujo__in=['PARTICULAR', 'AMBOS'], activa=True)
+            .exclude(clave='Rechazado').values_list('clave', flat=True)
+        ) + ['Vencido', 'PorVencer']
+        conteos_estatus = {
+            clave: qs_sin_chip.filter(_q_estatus_particular_fus(clave)).count()
+            for clave in claves_chip
+        }
+        conteos_prioridad = {
+            valor: qs_sin_chip.filter(prioridad=valor).count()
+            for valor in ('Alta', 'Media', 'Baja')
+        }
+
+        if prioridad:
+            qs = qs.filter(prioridad=prioridad)
+        if estatus_raw:
+            # Uno o varios chips a la vez (ej. "Registrado,Turnado") — se
+            # combinan con OR, ya que un FUS solo puede estar en un estatus:
+            # seleccionar varios amplía la bandeja, no la reduce a la
+            # intersección (que siempre daría vacío salvo Vencido/PorVencer,
+            # que son temporalidad y sí pueden convivir con un estatus).
+            q_estatus = Q()
+            for estatus in {e.strip() for e in estatus_raw.split(',') if e.strip()}:
+                q_estatus |= _q_estatus_particular_fus(estatus)
+            qs = qs.filter(q_estatus)
+
         qs = qs.order_by('-fechaRegistro')
 
         # Paginación
@@ -209,7 +241,10 @@ class FUSListCreateView(APIView):
         pagina = list(qs[offset: offset + page_size])
         mapa   = mapa_correos_autorizados(emails_de_fus(pagina))
         data   = FUSSerializer(pagina, many=True, context={'mapa_correos': mapa}).data
-        return Response({'total': total, 'page': page, 'page_size': page_size, 'results': data})
+        return Response({
+            'total': total, 'page': page, 'page_size': page_size, 'results': data,
+            'conteos': {'estatus': conteos_estatus, 'prioridad': conteos_prioridad},
+        })
 
     def post(self, request):
         user  = request.user
