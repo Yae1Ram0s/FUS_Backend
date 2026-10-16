@@ -75,11 +75,22 @@ class ActividadListCreateView(APIView):
         return Response(ActividadSerializer(actividad).data, status=201)
 
 
+def _es_limite_de_fus(actividad):
+    """El recordatorio "Vence FUS" lo gestiona el sistema (se crea al registrar/
+    turnar con fecha límite): no se edita ni se desvincula desde el calendario."""
+    return actividad.tipo == 'limite' and actividad.idFusRelacionado_id is not None
+
+
+_MSG_LIMITE_FUS = {'detail': 'Este recordatorio está vinculado a un FUS y no se puede modificar.'}
+
+
 class ActividadDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def patch(self, request, pk):
         actividad = get_object_or_404(Actividad, pk=pk, idCreador=request.user, activo=1)
+        if _es_limite_de_fus(actividad):
+            return Response(_MSG_LIMITE_FUS, status=403)
         data = request.data
 
         participantes_nuevos = data.get('participantes')
@@ -129,6 +140,8 @@ class ActividadDetailView(APIView):
 
     def delete(self, request, pk):
         actividad = get_object_or_404(Actividad, pk=pk, idCreador=request.user, activo=1)
+        if _es_limite_de_fus(actividad):
+            return Response(_MSG_LIMITE_FUS, status=403)
         actividad.activo = 0
         actividad.save()
         return Response(status=204)
