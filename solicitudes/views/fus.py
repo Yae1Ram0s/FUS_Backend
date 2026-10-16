@@ -3,8 +3,9 @@ import re
 
 from django.conf import settings
 from django.db import connection
-from django.db.models import Count, Q, FloatField
+from django.db.models import Case, Count, IntegerField, Max, OuterRef, Q, FloatField, Subquery, Value, When
 from django.db.models.expressions import RawSQL
+from django.db.models.functions import Coalesce, Greatest
 from django.http import FileResponse, Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -18,6 +19,7 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from autenticacion.models import CorreoAutorizado
 from catalogos.models import MedioRecepcion, Estatus
 from ..models import FUS, Evidencia, Turnado, Actividad, SeguimientoRespuesta
+from ..estatus_efectivo import PLAZOS, anotar_estatus_efectivo, clave_chip, q_plazo, separar_estatus_y_plazo
 from ..serializers import FUSSerializer
 from ..services import generar_folio, guardar_evidencias, eliminar_evidencias
 from ..utils import resolver_nombre
@@ -36,44 +38,11 @@ _FULLTEXT_OPERADORES = re.compile(r'[+\-><()~*"@]')
 _FULLTEXT_MIN_TOKEN = 3
 
 
-def _q_estatus_particular_fus(clave):
-    """Arma el Q() de un solo estatus/temporalidad para FUS.estatusParticular
-    — factorizado de FUSListCreateView.get para reusarlo tal cual al filtrar
-    (varios claves con OR) y al calcular los conteos por chip (uno a la vez,
-    sobre el queryset sin el propio filtro de estatus/prioridad aplicado)."""
-    if clave == 'Vencido':
-        # Indicador de temporalidad, no de estatus: por fechaLimite, sin
-        # importar en qué estatus del trámite esté el FUS — salvo Concluido,
-        # ya cerrado, donde la temporalidad deja de aplicar (mismo criterio
-        # que FUSSerializer.get_estadoTemporalidad).
-        return Q(fechaLimite__lt=timezone.now()) & ~Q(estatusParticular_id='Concluido')
-    if clave == 'PorVencer':
-        from datetime import timedelta
-        ahora = timezone.now()
-        return Q(
-            fechaLimite__gte=ahora, fechaLimite__lte=ahora + timedelta(hours=24),
-        ) & ~Q(estatusParticular_id='Concluido')
-    if clave == 'Pendiente_validacion':
-        # Con un solo Titular turnado (sin comisionar), marcar "Atendido"
-        # deja fus.estatusParticular en 'Atendido' — el que de verdad pasa a
-        # 'Pendiente_validacion' es ese turnado (MarcarTurnadoAtendidoView,
-        # turnado.py), porque con varias personas "Atendido" no implica que
-        # todas ya estén listas. La tarjeta ya refleja esto mostrando el
-        # estatus del turnado cuando es el único activo
-        # (FUSSerializer.get_estatusVisual) — este filtro necesita el mismo
-        # criterio, o "Por validar" nunca encuentra esos FUS aunque la
-        # tarjeta sí diga "Por validar".
-        fus_un_turnado = (
-            Turnado.objects.filter(activo=1)
-            .values('idFus_id').annotate(n=Count('id')).filter(n=1)
-            .values('idFus_id')
-        )
-        fus_un_turnado_pendiente = Turnado.objects.filter(
-            activo=1, estatusTitular_id='Pendiente_validacion',
-            idFus_id__in=fus_un_turnado,
-        ).values('idFus_id')
-        return Q(estatusParticular_id='Pendiente_validacion') | Q(pk__in=fus_un_turnado_pendiente)
-    return Q(estatusParticular_id=clave)
+def _q_plazo_fus(plazos):
+    """Plazo (Vencido/Por vencer) sobre FUS.fechaLimite, sin contar lo que ya
+    está Concluido según el estatus efectivo (mismo criterio que
+    FUSSerializer.get_estadoTemporalidad)."""
+    return q_plazo(plazos, 'fechaLimite', Q(_estatus_chip='Concluido'))
 
 
 def _termino_fulltext_booleano(search):
@@ -108,7 +77,13 @@ class FUSListCreateView(APIView):
             propietario = _propietario_fus(request.user)
             qs = qs.filter(idSolicitanteInterno=propietario) if propietario else qs.none()
 
+        # Estatus efectivo de cada FUS (`_estatus_chip`) — el mismo que ve la
+        # tarjeta, para que el filtro y los conteos cuenten cada FUS en un
+        # solo chip (ver estatus_efectivo.py).
+        qs = anotar_estatus_efectivo(qs)
+
         estatus_raw = request.query_params.get('estatusParticular')
+        plazo_raw   = request.query_params.get('plazo')
         prioridad   = request.query_params.get('prioridad')
         search      = request.query_params.get('search')
         folio       = request.query_params.get('folio')
@@ -189,45 +164,63 @@ class FUSListCreateView(APIView):
                 )
             qs = qs.filter(condiciones).distinct()
 
-        # Snapshot previo a los filtros de chip (estatus/prioridad): de aquí
-        # salen los conteos por chip que ve el frontend — si se calcularan
-        # sobre `qs` ya filtrado por el chip activo, los DEMÁS chips
-        # mostrarían siempre 0 en cuanto se selecciona uno (justo el bug
-        # reportado). Sí respeta folio/search/scope de rol, para que los
-        # conteos coincidan con la bandeja que el usuario está viendo.
-        qs_sin_chip = qs
-
-        # Mismos chips que arma ConsultarFUS.jsx (useEstatus('PARTICULAR'),
-        # que en el backend trae PARTICULAR + AMBOS — ver EstatusListView):
-        # catálogo activo de esos dos tipos, sin "Rechazado" (ahí no se
-        # ofrece), más las dos temporalidades.
-        claves_chip = list(
-            Estatus.objects.filter(tipoFlujo__in=['PARTICULAR', 'AMBOS'], activa=True)
-            .exclude(clave='Rechazado').values_list('clave', flat=True)
-        ) + ['Vencido', 'PorVencer']
-        conteos_estatus = {
-            clave: qs_sin_chip.filter(_q_estatus_particular_fus(clave)).count()
-            for clave in claves_chip
-        }
-        conteos_prioridad = {
-            valor: qs_sin_chip.filter(prioridad=valor).count()
-            for valor in ('Alta', 'Media', 'Baja')
-        }
-
+        # La prioridad ya no tiene chip (solo llega por enlace desde el
+        # dashboard), pero se aplica ANTES de los conteos: así chips y lista
+        # hablan siempre del mismo conjunto de FUS.
         if prioridad:
             qs = qs.filter(prioridad=prioridad)
-        if estatus_raw:
-            # Uno o varios chips a la vez (ej. "Registrado,Turnado") — se
-            # combinan con OR, ya que un FUS solo puede estar en un estatus:
-            # seleccionar varios amplía la bandeja, no la reduce a la
-            # intersección (que siempre daría vacío salvo Vencido/PorVencer,
-            # que son temporalidad y sí pueden convivir con un estatus).
-            q_estatus = Q()
-            for estatus in {e.strip() for e in estatus_raw.split(',') if e.strip()}:
-                q_estatus |= _q_estatus_particular_fus(estatus)
-            qs = qs.filter(q_estatus)
 
-        qs = qs.order_by('-fechaRegistro')
+        # Dos grupos de chips, independientes entre sí:
+        #  * Estatus (exclusivos: cada FUS cae en uno solo, la suma da el
+        #    total). Uno o varios a la vez se combinan con OR — un FUS solo
+        #    tiene un estatus, así que seleccionar varios amplía la bandeja.
+        #  * Plazo (Vencido / Por vencer): temporalidad que cruza los
+        #    estatus; se combina con el estatus elegido (AND).
+        # Cada grupo cuenta sobre el filtro del OTRO grupo, no sobre el suyo
+        # — si no, al elegir un chip los demás se verían en 0.
+        # 'En_seguimiento' es alias del chip 'Atendido' (ver CHIP_DE_ESTATUS).
+        estatus_pedidos, plazos = separar_estatus_y_plazo(estatus_raw, plazo_raw, clave_chip)
+        q_estatus = Q(_estatus_chip__in=estatus_pedidos) if estatus_pedidos else Q()
+        filtro_plazo = _q_plazo_fus(plazos)
+
+        # Mismos chips que arma ConsultarFUS.jsx (useEstatus('PARTICULAR'),
+        # que en el backend trae PARTICULAR + AMBOS — ver EstatusListView).
+        claves_chip = list(
+            Estatus.objects.filter(tipoFlujo__in=['PARTICULAR', 'AMBOS'], activa=True)
+            .values_list('clave', flat=True)
+        )
+        por_estatus = dict(
+            qs.filter(filtro_plazo).order_by()
+            .values_list('_estatus_chip').annotate(n=Count('pk', distinct=True))
+        )
+        conteos_estatus = {clave: por_estatus.get(clave, 0) for clave in claves_chip}
+        conteos_plazo = {
+            plazo: qs.filter(q_estatus).filter(_q_plazo_fus([plazo])).distinct().count()
+            for plazo in PLAZOS
+        }
+        conteo_total = sum(por_estatus.values())
+
+        qs = qs.filter(q_estatus).filter(filtro_plazo)
+
+        # Orden de la bandeja: primero prioridad Alta; dentro de cada grupo,
+        # lo que cambió más recientemente va arriba. "Cambio" = la última
+        # modificación del FUS o de cualquiera de sus turnados activos (varias
+        # acciones — marcar atendido, validar — solo tocan el turnado y no el
+        # FUS), con fechaRegistro de respaldo para filas sin fechas.
+        ultimo_turnado = (
+            Turnado.objects.filter(idFus=OuterRef('pk'), activo=1)
+            .order_by().values('idFus').annotate(m=Max('fechaModificacion')).values('m')
+        )
+        qs = qs.annotate(
+            _alta_primero=Case(
+                When(prioridad='Alta', then=Value(0)),
+                default=Value(1), output_field=IntegerField(),
+            ),
+            _ultimo_cambio=Greatest(
+                Coalesce('fechaModificacion', 'fechaRegistro'),
+                Coalesce(Subquery(ultimo_turnado), 'fechaRegistro'),
+            ),
+        ).order_by('_alta_primero', '-_ultimo_cambio', '-fechaRegistro', '-pk')
 
         # Paginación
         try:
@@ -243,7 +236,7 @@ class FUSListCreateView(APIView):
         data   = FUSSerializer(pagina, many=True, context={'mapa_correos': mapa}).data
         return Response({
             'total': total, 'page': page, 'page_size': page_size, 'results': data,
-            'conteos': {'estatus': conteos_estatus, 'prioridad': conteos_prioridad},
+            'conteos': {'total': conteo_total, 'estatus': conteos_estatus, 'plazo': conteos_plazo},
         })
 
     def post(self, request):

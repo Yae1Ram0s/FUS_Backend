@@ -25,7 +25,10 @@ from solicitudes.utils import _equipo_particular_de
 
 
 class Command(BaseCommand):
-    help = 'Notifica los FUS cuyo límite de respuesta está por vencer (hoy: <=2h, día futuro: <=1 día).'
+    help = (
+        'Notifica los FUS cuyo límite de respuesta está por vencer (hoy: <=2h, día futuro: <=1 día) '
+        'y los que ya vencieron (una vez por fecha límite).'
+    )
 
     def handle(self, *args, **options):
         ahora = timezone.now()
@@ -68,6 +71,7 @@ class Command(BaseCommand):
         candidatos = {f.id: f for f in list(candidatos_hoy) + list(candidatos_futuro)}.values()
 
         creadas = 0
+        vencidos_creadas = 0
         # Se acumulan todas las notificaciones de la corrida y se encolan
         # juntas al final — un solo trabajo de correo para todo el barrido
         # (el comando corre periódicamente vía cron, sin urgencia de
@@ -111,5 +115,55 @@ class Command(BaseCommand):
                 _notifs_sla.append(notif)
                 creadas += 1
 
+        # FUS ya vencidos (límite pasado, sin concluir): se avisa UNA vez por
+        # cada fecha límite — "ya avisado" = existe un SLA_VENCIDO generado
+        # después de esa fechaLimite. Si el Particular da una prórroga, la
+        # nueva fechaLimite queda otra vez por delante de cualquier aviso
+        # previo, así que si vuelve a vencer se avisa de nuevo.
+        vencidos = base.filter(fechaLimite__lt=ahora)
+        for fus in vencidos:
+            ya_avisado = Notificacion.objects.filter(
+                fusFolio=fus.folio,
+                tipoEvento='SLA_VENCIDO',
+                fechaGeneracion__gte=fus.fechaLimite,
+            ).exists()
+            if ya_avisado:
+                continue
+
+            limite_local = timezone.localtime(fus.fechaLimite).strftime('%d/%m/%Y %H:%M')
+            mensaje = (
+                f"El FUS {fus.folio} está vencido (límite: {limite_local}). "
+                "El Particular puede darle una prórroga de fecha."
+            )
+            for dest in self._destinatarios(fus):
+                notif = Notificacion.objects.create(
+                    idDestinatario=dest,
+                    fusFolio=fus.folio,
+                    tipoEvento='SLA_VENCIDO',
+                    mensaje=mensaje,
+                )
+                push_notificacion(notif)
+                _notifs_sla.append(notif)
+                vencidos_creadas += 1
+
         notificar_por_correo_lote(_notifs_sla)
-        self.stdout.write(self.style.SUCCESS(f'{creadas} notificaciones de SLA creadas.'))
+        self.stdout.write(self.style.SUCCESS(
+            f'{creadas} notificaciones de SLA por vencer y {vencidos_creadas} de SLA vencido creadas.'
+        ))
+
+    @staticmethod
+    def _destinatarios(fus):
+        """Dueño del FUS + su equipo, Titular del turnado activo y comisionado."""
+        turnado_activo = Turnado.objects.filter(
+            idFus=fus, activo=1
+        ).exclude(estatusTitular_id='Concluido').first()
+
+        destinatarios = set()
+        if fus.idSolicitanteInterno_id:
+            destinatarios.add(fus.idSolicitanteInterno)
+            destinatarios |= set(_equipo_particular_de(fus.idSolicitanteInterno))
+        if turnado_activo and turnado_activo.idDestinatario_id:
+            destinatarios.add(turnado_activo.idDestinatario)
+        if fus.idComisionado_id:
+            destinatarios.add(fus.idComisionado)
+        return destinatarios

@@ -1,9 +1,11 @@
 import os
 import tempfile
 from datetime import timedelta
+from io import StringIO
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth.models import User
+from django.core.management import call_command
 from django.test import override_settings
 from django.utils import timezone
 from rest_framework import status
@@ -11,6 +13,7 @@ from rest_framework.test import APITestCase, APITransactionTestCase
 
 from autenticacion.models import CorreoAutorizado
 from catalogos.models import Estatus, MedioRecepcion, UnidadAdministrativa
+from .estatus_efectivo import clave_chip
 from .models import FUS, Evidencia, Turnado, Bitacora, Notificacion, Actividad, PushSubscription
 
 
@@ -924,7 +927,7 @@ class SeguimientoComisionadoNotificaAlDuenoEnOtraUnidadTests(APITestCase):
     def test_dueno_original_recibe_notificacion_aunque_el_comisionado_sea_de_otra_unidad(self):
         self.client.force_authenticate(user=self.comisionado)
         resp = self.client.post(f'/api/fus/{self.fus.pk}/seguimiento/', {
-            'tipo': 'avance', 'contenido': 'Ya empecé a revisar el expediente.',
+            'descripcionActividad': 'Ya empecé a revisar el expediente.',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
 
@@ -1181,6 +1184,199 @@ class RevisarSlaNotificaComisionadoTests(APITestCase):
                 idDestinatario=comisionado, fusFolio=fus.folio, tipoEvento='SLA_POR_VENCER',
             ).exists()
         )
+
+
+class SlaVencidoYProrrogaTests(APITestCase):
+    """revisar_sla avisa de los FUS ya vencidos (una vez por fecha límite) y
+    el Particular dueño puede darles prórroga de fecha."""
+
+    @classmethod
+    def setUpTestData(cls):
+        Estatus.objects.get_or_create(
+            clave='Registrado', defaults={'nombre': 'Registrado', 'tipoFlujo': 'PARTICULAR', 'orden': 1},
+        )
+        Estatus.objects.get_or_create(
+            clave='En_seguimiento', defaults={'nombre': 'En seguimiento', 'tipoFlujo': 'PARTICULAR', 'orden': 2},
+        )
+        Estatus.objects.get_or_create(
+            clave='Concluido', defaults={'nombre': 'Concluido', 'tipoFlujo': 'PARTICULAR', 'orden': 3},
+        )
+        cls.rol1 = User.objects.create_user(username='rol1p@t.mx', email='rol1p@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rol1p@t.mx', nombre='Rol1', rol='ROL1', activo=1)
+        cls.otro_rol1 = User.objects.create_user(username='otrop@t.mx', email='otrop@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='otrop@t.mx', nombre='Otro', rol='ROL1', activo=1)
+        cls.comisionado = User.objects.create_user(username='comip@t.mx', email='comip@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='comip@t.mx', nombre='Comi', rol='COMISIONADO', activo=1)
+
+    def _fus(self, folio, limite, estatus='En_seguimiento'):
+        from django.utils import timezone
+        return FUS.objects.create(
+            folio=folio, idSolicitanteInterno=self.rol1, descripcion='x', contexto='',
+            estatusParticular_id=estatus, idUsuarioRegistra=self.rol1.id,
+            idComisionado=self.comisionado, fechaLimite=limite,
+        )
+
+    def test_revisar_sla_avisa_de_fus_vencido_una_sola_vez(self):
+        from datetime import timedelta
+
+        from django.core.management import call_command
+        from django.utils import timezone
+
+        fus = self._fus('ANAM/PARTICULAR/FUS/0801/2026', timezone.now() - timedelta(days=1))
+
+        call_command('revisar_sla')
+        call_command('revisar_sla')
+
+        for dest in (self.rol1, self.comisionado):
+            self.assertEqual(
+                Notificacion.objects.filter(
+                    idDestinatario=dest, fusFolio=fus.folio, tipoEvento='SLA_VENCIDO',
+                ).count(), 1,
+            )
+
+    def test_revisar_sla_no_avisa_vencido_si_ya_concluido(self):
+        from datetime import timedelta
+
+        from django.core.management import call_command
+        from django.utils import timezone
+
+        fus = self._fus('ANAM/PARTICULAR/FUS/0802/2026', timezone.now() - timedelta(days=1), estatus='Concluido')
+        call_command('revisar_sla')
+        self.assertFalse(Notificacion.objects.filter(fusFolio=fus.folio, tipoEvento='SLA_VENCIDO').exists())
+
+    def test_prorroga_actualiza_fecha_limite_y_notifica(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        fus = self._fus('ANAM/PARTICULAR/FUS/0803/2026', timezone.now() - timedelta(days=1))
+        nueva = timezone.now() + timedelta(days=5)
+        self.client.force_authenticate(user=self.rol1)
+
+        resp = self.client.post(
+            f'/api/fus/{fus.id}/prorroga/',
+            {'fechaLimite': nueva.isoformat(), 'motivo': 'Falta información'}, format='json',
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        fus.refresh_from_db()
+        self.assertAlmostEqual(fus.fechaLimite, nueva, delta=timedelta(seconds=1))
+        self.assertEqual(resp.data['estadoTemporalidad'], None)
+        self.assertTrue(Bitacora.objects.filter(fusFolio=fus.folio, accion='PRORROGA_FUS').exists())
+        self.assertTrue(Notificacion.objects.filter(
+            idDestinatario=self.comisionado, fusFolio=fus.folio, tipoEvento='PRORROGA_FUS',
+        ).exists())
+        self.assertFalse(Notificacion.objects.filter(
+            idDestinatario=self.rol1, tipoEvento='PRORROGA_FUS',
+        ).exists())
+
+    def test_prorroga_exige_fecha_posterior_y_motivo(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        limite = timezone.now() + timedelta(days=3)
+        fus = self._fus('ANAM/PARTICULAR/FUS/0804/2026', limite)
+        self.client.force_authenticate(user=self.rol1)
+        url = f'/api/fus/{fus.id}/prorroga/'
+
+        anterior = self.client.post(
+            url, {'fechaLimite': (limite - timedelta(hours=1)).isoformat(), 'motivo': 'x'}, format='json',
+        )
+        sin_motivo = self.client.post(
+            url, {'fechaLimite': (limite + timedelta(days=1)).isoformat(), 'motivo': '  '}, format='json',
+        )
+
+        self.assertEqual(anterior.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(sin_motivo.status_code, status.HTTP_400_BAD_REQUEST)
+        fus.refresh_from_db()
+        self.assertAlmostEqual(fus.fechaLimite, limite, delta=timedelta(seconds=1))
+
+    def test_prorroga_solo_para_el_dueno_del_fus(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        fus = self._fus('ANAM/PARTICULAR/FUS/0805/2026', timezone.now() - timedelta(days=1))
+        nueva = (timezone.now() + timedelta(days=2)).isoformat()
+
+        self.client.force_authenticate(user=self.otro_rol1)
+        r_ajeno = self.client.post(f'/api/fus/{fus.id}/prorroga/', {'fechaLimite': nueva, 'motivo': 'x'}, format='json')
+        self.client.force_authenticate(user=self.comisionado)
+        r_comi = self.client.post(f'/api/fus/{fus.id}/prorroga/', {'fechaLimite': nueva, 'motivo': 'x'}, format='json')
+
+        self.assertEqual(r_ajeno.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(r_comi.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_tras_prorroga_si_vuelve_a_vencer_se_avisa_de_nuevo(self):
+        from datetime import timedelta
+
+        from django.core.management import call_command
+        from django.utils import timezone
+
+        fus = self._fus('ANAM/PARTICULAR/FUS/0806/2026', timezone.now() - timedelta(days=2))
+        call_command('revisar_sla')
+        # Simula el paso del tiempo: el primer aviso ocurrió hace 3 días, se dio
+        # una prórroga de 1 día (límite hace 2 días + 1 = ayer) y ya volvió a vencer.
+        Notificacion.objects.filter(fusFolio=fus.folio).update(fechaGeneracion=timezone.now() - timedelta(days=3))
+        FUS.objects.filter(pk=fus.pk).update(fechaLimite=timezone.now() - timedelta(days=1))
+        call_command('revisar_sla')
+
+        self.assertEqual(
+            Notificacion.objects.filter(
+                idDestinatario=self.rol1, fusFolio=fus.folio, tipoEvento='SLA_VENCIDO',
+            ).count(), 2,
+        )
+
+
+class ActividadVencidoTests(APITestCase):
+    """ActividadSerializer.vencido — solo los límites (tipo 'limite') ya pasados."""
+
+    @classmethod
+    def setUpTestData(cls):
+        Estatus.objects.get_or_create(
+            clave='En_seguimiento', defaults={'nombre': 'En seguimiento', 'tipoFlujo': 'PARTICULAR', 'orden': 2},
+        )
+        cls.rol1 = User.objects.create_user(username='rol1v@t.mx', email='rol1v@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rol1v@t.mx', nombre='Rol1', rol='ROL1', activo=1)
+
+    def _actividad(self, tipo, dias, fus=None):
+        from datetime import time
+        fecha = (timezone.now() + timedelta(days=dias)).date()
+        return Actividad.objects.create(
+            titulo='x', fecha=fecha, horaInicio=time(10, 0), horaFin=time(11, 0),
+            tipo=tipo, idCreador=self.rol1, idFusRelacionado=fus,
+        )
+
+    def _fus(self, folio, dias_limite):
+        return FUS.objects.create(
+            folio=folio, idSolicitanteInterno=self.rol1, descripcion='x', contexto='',
+            estatusParticular_id='En_seguimiento', idUsuarioRegistra=self.rol1.id,
+            fechaLimite=timezone.now() + timedelta(days=dias_limite),
+        )
+
+    def _vencido(self, actividad):
+        from .serializers import ActividadSerializer
+        return ActividadSerializer(actividad).data['vencido']
+
+    def test_limite_con_fus_vencido(self):
+        fus = self._fus('ANAM/PARTICULAR/FUS/0901/2026', -3)
+        self.assertTrue(self._vencido(self._actividad('limite', -3, fus)))
+
+    def test_limite_con_fus_vigente_no_esta_vencido(self):
+        fus = self._fus('ANAM/PARTICULAR/FUS/0902/2026', 5)
+        self.assertFalse(self._vencido(self._actividad('limite', 5, fus)))
+
+    def test_limite_prorrogado_deja_de_estar_vencido(self):
+        # El recordatorio sigue en su fecha vieja pero el FUS ya tiene nueva fecha límite
+        fus = self._fus('ANAM/PARTICULAR/FUS/0903/2026', 4)
+        self.assertFalse(self._vencido(self._actividad('limite', -3, fus)))
+
+    def test_limite_sin_fus_pasado_esta_vencido(self):
+        self.assertTrue(self._vencido(self._actividad('limite', -2)))
+
+    def test_reunion_pasada_no_esta_vencida(self):
+        self.assertFalse(self._vencido(self._actividad('reunion', -2)))
 
 
 class WebPushTests(APITestCase):
@@ -1670,6 +1866,99 @@ class MensajeNotificacionSegunNumeroTurnadosTests(APITestCase):
         self.assertIn('concluyó tu parte', notif.mensaje)
 
 
+class RechazarPersonaActualizaElFUSTests(APITestCase):
+    """RechazarPersonaTurnadoView — con una sola persona turnada (o cuando ya
+    todas están rechazadas), rechazar su parte deja TAMBIÉN el FUS en
+    'Rechazado', igual que RechazarSolicitudView; con varias personas, el
+    rechazo de una sola no cambia el estatus del FUS. Incluye el comando que
+    corrige los FUS que quedaron contradictorios antes de este cambio."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.medio = MedioRecepcion.objects.create(nombreMedio='Correo electrónico', paraTurnado=1)
+        cls.rol1 = User.objects.create_user(username='rechrol1@t.mx', email='rechrol1@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='rechrol1@t.mx', nombre='Rol1', rol='ROL1', activo=1)
+
+    def _fus_con_turnados(self, n, emails, estatus_fus='Turnado', estatus_turnado='Recibido'):
+        fus = FUS.objects.create(
+            folio=f'ANAM/PARTICULAR/FUS/{3000 + n}/2026', idSolicitanteInterno=self.rol1,
+            descripcion='x', contexto='', estatusParticular_id=estatus_fus,
+            idUsuarioRegistra=self.rol1.id,
+        )
+        turnados = []
+        for email in emails:
+            u = User.objects.create_user(username=email, email=email, password='x')
+            CorreoAutorizado.objects.create(email=email, nombre=email.split('@')[0], rol='ROL2', activo=1)
+            turnados.append(Turnado.objects.create(
+                idFus=fus, idRemitente=self.rol1, idDestinatario=u,
+                idMedio=self.medio, estatusTitular_id=estatus_turnado, activo=1,
+            ))
+        return fus, turnados
+
+    def _responder(self, turnado):
+        self.client.force_authenticate(user=turnado.idDestinatario)
+        resp = self.client.post(
+            f'/api/turnados/{turnado.id}/seguimientos/', {'descripcionActividad': 'Reviso', 'accionTexto': ''},
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+
+    def _atendido_y_rechazar(self, turnado):
+        self._responder(turnado)
+        self.client.post(f'/api/turnados/{turnado.id}/atendido/')
+        self.client.force_authenticate(user=self.rol1)
+        resp = self.client.post(f'/api/turnados/{turnado.id}/rechazar-persona/', {'motivo': 'Falta información'})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        return resp
+
+    def test_un_solo_turnado_rechazado_deja_el_fus_rechazado_y_se_reabre_al_responder(self):
+        fus, [t] = self._fus_con_turnados(1, ['rechsolo@t.mx'])
+        resp = self._atendido_y_rechazar(t)
+        self.assertEqual(resp.data['estatusParticular'], 'Rechazado')
+        fus.refresh_from_db()
+        self.assertEqual(fus.estatusParticular_id, 'Rechazado')
+
+        # Una nueva respuesta del Titular lo reabre: turnado y FUS vuelven a seguimiento.
+        self._responder(t)
+        fus.refresh_from_db()
+        t.refresh_from_db()
+        self.assertEqual(fus.estatusParticular_id, 'Atendido')
+        self.assertEqual(t.estatusTitular_id, 'En_seguimiento')
+
+    def test_varios_turnados_el_rechazo_de_uno_no_cambia_el_fus(self):
+        fus, [t1, _t2] = self._fus_con_turnados(2, ['rechmulti1@t.mx', 'rechmulti2@t.mx'])
+        self._atendido_y_rechazar(t1)
+        fus.refresh_from_db()
+        self.assertEqual(fus.estatusParticular_id, 'Atendido')
+
+    def test_comando_corrige_fus_con_todos_sus_turnados_rechazados(self):
+        # Estado que dejaba el rechazo anterior: FUS 'Pendiente_validacion'
+        # con su única persona ya 'Rechazado'.
+        contradictorio, _ = self._fus_con_turnados(
+            3, ['rechcmd1@t.mx'], estatus_fus='Pendiente_validacion', estatus_turnado='Rechazado',
+        )
+        # Controles: varios turnados con uno solo rechazado, y uno ya correcto.
+        multi, _ = self._fus_con_turnados(4, ['rechcmd2@t.mx', 'rechcmd3@t.mx'], estatus_fus='Atendido')
+        primero = Turnado.objects.filter(idFus=multi).first()
+        Turnado.objects.filter(pk=primero.pk).update(estatusTitular_id='Rechazado')
+        correcto, _ = self._fus_con_turnados(5, ['rechcmd4@t.mx'], estatus_fus='Rechazado', estatus_turnado='Rechazado')
+
+        call_command('reconciliar_estatus_fus', stdout=StringIO())  # simulación: no guarda
+        contradictorio.refresh_from_db()
+        self.assertEqual(contradictorio.estatusParticular_id, 'Pendiente_validacion')
+
+        salida = StringIO()
+        call_command('reconciliar_estatus_fus', '--aplicar', stdout=salida)
+        for fus, esperado in ((contradictorio, 'Rechazado'), (multi, 'Atendido'), (correcto, 'Rechazado')):
+            fus.refresh_from_db()
+            self.assertEqual(fus.estatusParticular_id, esperado, fus.folio)
+        self.assertIn('1 FUS corregido', salida.getvalue())
+
+        # Idempotente: una segunda corrida ya no encuentra nada.
+        salida = StringIO()
+        call_command('reconciliar_estatus_fus', '--aplicar', stdout=salida)
+        self.assertIn('Nada que corregir', salida.getvalue())
+
+
 class BusquedaFUSFulltextTests(APITransactionTestCase):
     """FUSListCreateView.get(search=...) — migración 0033: MATCH()...AGAINST()
     IN BOOLEAN MODE sobre FUS.descripcion/contexto, Evidencia.nombreArchivo/
@@ -1904,9 +2193,14 @@ class TodosLosChipsConsultarFUSFiltranCorrectoTests(APITestCase):
 
     def test_chip_vencido(self):
         # f_concl_venc tiene fechaLimite vencida pero está Concluido: no cuenta.
-        self.assertEqual(self._folios(estatusParticular='Vencido'), {self.f_vencido.folio})
+        self.assertEqual(self._folios(plazo='Vencido'), {self.f_vencido.folio})
 
     def test_chip_por_vencer(self):
+        self.assertEqual(self._folios(plazo='PorVencer'), {self.f_por_vencer.folio})
+
+    def test_plazo_tambien_se_acepta_dentro_de_estatusparticular(self):
+        # Enlaces viejos de los dashboards mandan Vencido/PorVencer en `filtro`.
+        self.assertEqual(self._folios(estatusParticular='Vencido'), {self.f_vencido.folio})
         self.assertEqual(self._folios(estatusParticular='PorVencer'), {self.f_por_vencer.folio})
 
     def test_varios_chips_de_estatus_se_combinan_con_or(self):
@@ -1924,17 +2218,208 @@ class TodosLosChipsConsultarFUSFiltranCorrectoTests(APITestCase):
         # los que no están seleccionados) debe ser igual a lo que ese chip
         # devolvería si se seleccionara solo.
         resp = self.client.get('/api/fus/', {'estatusParticular': 'Registrado'})
-        conteos = resp.data['conteos']['estatus']
-        for clave in ('Registrado', 'Turnado', 'Atendido', 'Concluido', 'Pendiente_validacion', 'Vencido', 'PorVencer'):
+        conteos = resp.data['conteos']
+        for clave in ('Registrado', 'Turnado', 'Atendido', 'Concluido', 'Pendiente_validacion', 'Rechazado'):
             with self.subTest(clave=clave):
-                self.assertEqual(conteos[clave], len(self._folios(estatusParticular=clave)))
+                self.assertEqual(conteos['estatus'][clave], len(self._folios(estatusParticular=clave)))
+        # El plazo cuenta dentro del estatus elegido (Registrado), no sobre todo.
+        for plazo in ('Vencido', 'PorVencer'):
+            with self.subTest(plazo=plazo):
+                self.assertEqual(
+                    conteos['plazo'][plazo],
+                    len(self._folios(estatusParticular='Registrado', plazo=plazo)),
+                )
+
+    def test_chip_rechazado(self):
+        Estatus.objects.get_or_create(
+            clave='Rechazado', defaults={'nombre': 'Rechazado', 'tipoFlujo': 'PARTICULAR', 'orden': 9},
+        )
+        rechazado = FUS.objects.create(
+            folio='ANAM/PARTICULAR/FUS/1008/2026', idSolicitanteInterno=self.rol1, descripcion='x',
+            contexto='', estatusParticular_id='Rechazado', idUsuarioRegistra=self.rol1.id, prioridad='Media',
+        )
+        self.assertEqual(self._folios(estatusParticular='Rechazado'), {rechazado.folio})
+        resp = self.client.get('/api/fus/')
+        self.assertEqual(resp.data['conteos']['estatus']['Rechazado'], 1)
+
+    def test_chip_rechazado_incluye_fus_con_un_solo_turnado_rechazado(self):
+        # RechazarPersonaTurnadoView solo marca el turnado como 'Rechazado':
+        # el FUS conserva su estatus, pero la tarjeta (estatusVisual) lo
+        # muestra "Rechazado" cuando es la única persona — el chip debe
+        # encontrarlo igual. Con varias personas, el rechazo de una sola no
+        # convierte al FUS en Rechazado.
+        Estatus.objects.get_or_create(
+            clave='Rechazado', defaults={'nombre': 'Rechazado', 'tipoFlujo': 'PARTICULAR', 'orden': 9},
+        )
+        rol2 = User.objects.create_user(username='chipsrol2c@t.mx', email='chipsrol2c@t.mx', password='x')
+        rol2_b = User.objects.create_user(username='chipsrol2d@t.mx', email='chipsrol2d@t.mx', password='x')
+        medio = MedioRecepcion.objects.create(nombreMedio='Correo electrónico', paraTurnado=1)
+
+        def fus_con_turnados(folio, *estatus_titulares):
+            fus = FUS.objects.create(
+                folio=folio, idSolicitanteInterno=self.rol1, descripcion='x', contexto='',
+                estatusParticular_id='Atendido', idUsuarioRegistra=self.rol1.id, prioridad='Media',
+            )
+            for destinatario, estatus in zip((rol2, rol2_b), estatus_titulares):
+                Turnado.objects.create(
+                    idFus=fus, idRemitente=self.rol1, idDestinatario=destinatario,
+                    idMedio=medio, estatusTitular_id=estatus, activo=1,
+                )
+            return fus
+
+        un_turnado = fus_con_turnados('ANAM/PARTICULAR/FUS/1009/2026', 'Rechazado')
+        fus_con_turnados('ANAM/PARTICULAR/FUS/1010/2026', 'Rechazado', 'Pendiente_validacion')
+
+        self.assertEqual(self._folios(estatusParticular='Rechazado'), {un_turnado.folio})
+        resp = self.client.get('/api/fus/')
+        self.assertEqual(resp.data['conteos']['estatus']['Rechazado'], 1)
+
+    def test_orden_prioridad_alta_primero_y_luego_lo_ultimo_que_cambio(self):
+        def folios():
+            return [item['folio'] for item in self.client.get('/api/fus/').data['results']]
+
+        self.assertEqual(folios()[0], self.f_registrado.folio)
+
+        # Un FUS que no es Alta y recibe un cambio sube al inicio de su grupo,
+        # pero sin pasar por encima de las prioridades Alta.
+        self.f_atendido.idUsuarioModifica = self.rol1.id
+        self.f_atendido.save()
+        orden = folios()
+        self.assertEqual(orden[0], self.f_registrado.folio)
+        self.assertEqual(orden[1], self.f_atendido.folio)
+
+        # Si el FUS Alta también cambia, sigue primero.
+        self.f_registrado.save()
+        self.assertEqual(folios()[0], self.f_registrado.folio)
+
+
+class ChipsDeEstatusSumanElTotalTests(APITestCase):
+    """Consultar FUS (Rol 1): cada FUS cae en UN solo chip de estatus (el que
+    muestra su tarjeta), así que los chips suman el total. Vencido / Por vencer
+    son un grupo aparte ("Plazo") que cruza los estatus y se combina con ellos.
+    Los escenarios reproducen los casos que antes se contaban en dos chips."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.medio = MedioRecepcion.objects.create(nombreMedio='Correo electrónico', paraTurnado=1)
+        cls.rol1 = User.objects.create_user(username='sumarol1@t.mx', email='sumarol1@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='sumarol1@t.mx', nombre='Rol1', rol='ROL1', activo=1)
+        cls.rol2 = User.objects.create_user(username='sumarol2@t.mx', email='sumarol2@t.mx', password='x')
+        cls.rol2_b = User.objects.create_user(username='sumarol2b@t.mx', email='sumarol2b@t.mx', password='x')
+
+        ahora = timezone.now()
+        pasado, en_cinco_horas = ahora - timedelta(days=3), ahora + timedelta(hours=5)
+
+        def crear(n, estatus_fus, *turnados, limite=None):
+            fus = FUS.objects.create(
+                folio=f'ANAM/PARTICULAR/FUS/{2000 + n}/2026', idSolicitanteInterno=cls.rol1,
+                descripcion='x', contexto='', estatusParticular_id=estatus_fus,
+                idUsuarioRegistra=cls.rol1.id, prioridad='Media', fechaLimite=limite,
+            )
+            for destinatario, estatus in zip((cls.rol2, cls.rol2_b), turnados):
+                Turnado.objects.create(
+                    idFus=fus, idRemitente=cls.rol1, idDestinatario=destinatario,
+                    idMedio=cls.medio, estatusTitular_id=estatus, activo=1,
+                )
+            return fus
+
+        cls.f_registrado = crear(1, 'Registrado')
+        cls.f_turnado    = crear(2, 'Turnado', 'Recibido')
+        cls.f_seguim     = crear(3, 'Atendido', 'En_seguimiento', limite=pasado)
+        # El FUS conserva 'Atendido' pero su única persona fue rechazada.
+        cls.f_rech_turn  = crear(4, 'Atendido', 'Rechazado')
+        # FUS-level 'Pendiente_validacion' con turnado ya rechazado, y vencido.
+        cls.f_rech_venc  = crear(5, 'Pendiente_validacion', 'Rechazado', limite=pasado)
+        # Varias personas: manda el estatus del FUS ("En seguimiento").
+        cls.f_varios     = crear(6, 'Atendido', 'En_seguimiento', 'Recibido')
+        # Recién comisionado, sin respuesta ni turnado: FUS.En_seguimiento.
+        cls.f_comision   = crear(7, 'En_seguimiento')
+        cls.f_validar    = crear(8, 'Pendiente_validacion', 'Pendiente_validacion', limite=en_cinco_horas)
+        # Concluido con límite vencido: el plazo ya no aplica.
+        cls.f_concluido  = crear(9, 'Concluido', 'Concluido', limite=pasado)
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.rol1)
+
+    def _get(self, **params):
+        resp = self.client.get('/api/fus/', params)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        return resp.data
+
+    def _folios(self, **params):
+        return {item['folio'] for item in self._get(**params)['results']}
+
+    def test_los_chips_de_estatus_suman_el_total(self):
+        conteos = self._get()['conteos']
+        self.assertEqual(
+            conteos['estatus'],
+            {
+                'Registrado': 1, 'Turnado': 1, 'Atendido': 3, 'Pendiente_validacion': 1,
+                'Rechazado': 2, 'Concluido': 1,
+            },
+        )
+        self.assertEqual(conteos['total'], 9)
+        self.assertEqual(sum(conteos['estatus'].values()), conteos['total'])
+
+    def test_cada_fus_esta_en_el_chip_que_dice_su_tarjeta(self):
+        for item in self._get()['results']:
+            chip = clave_chip(item['estatusVisual'])
+            with self.subTest(folio=item['folio'], chip=chip):
+                self.assertIn(item['folio'], self._folios(estatusParticular=chip))
+
+    def test_rechazado_incluye_turnado_rechazado_aunque_el_fus_tenga_otro_estatus(self):
+        self.assertEqual(
+            self._folios(estatusParticular='Rechazado'),
+            {self.f_rech_turn.folio, self.f_rech_venc.folio},
+        )
+        # …y esos dos ya no se cuentan en "En seguimiento" ni en "Por validar".
+        self.assertEqual(
+            self._folios(estatusParticular='Atendido'),
+            {self.f_seguim.folio, self.f_varios.folio, self.f_comision.folio},
+        )
+        self.assertEqual(self._folios(estatusParticular='Pendiente_validacion'), {self.f_validar.folio})
+
+    def test_en_seguimiento_es_alias_de_atendido(self):
+        self.assertEqual(
+            self._folios(estatusParticular='En_seguimiento'),
+            self._folios(estatusParticular='Atendido'),
+        )
+
+    def test_plazo_cruza_los_estatus(self):
+        self.assertEqual(self._folios(plazo='Vencido'), {self.f_seguim.folio, self.f_rech_venc.folio})
+        self.assertEqual(self._folios(plazo='PorVencer'), {self.f_validar.folio})
+
+    def test_plazo_se_combina_con_el_estatus_elegido(self):
+        self.assertEqual(
+            self._folios(estatusParticular='Rechazado', plazo='Vencido'), {self.f_rech_venc.folio},
+        )
+        self.assertEqual(self._folios(estatusParticular='Concluido', plazo='Vencido'), set())
+
+    def test_cada_grupo_cuenta_sobre_el_filtro_del_otro(self):
+        # Con "Rechazado" elegido, el plazo cuenta solo dentro de los rechazados.
+        conteos = self._get(estatusParticular='Rechazado')['conteos']
+        self.assertEqual(conteos['plazo'], {'Vencido': 1, 'PorVencer': 0})
+        # Con "Vencido" elegido, los estatus cuentan solo dentro de los vencidos
+        # y siguen sumando el total.
+        conteos = self._get(plazo='Vencido')['conteos']
+        self.assertEqual(conteos['estatus']['Atendido'], 1)
+        self.assertEqual(conteos['estatus']['Rechazado'], 1)
+        self.assertEqual(conteos['total'], 2)
+        self.assertEqual(sum(conteos['estatus'].values()), conteos['total'])
+
+    def test_prioridad_por_enlace_tambien_ajusta_los_conteos(self):
+        FUS.objects.filter(pk=self.f_comision.pk).update(prioridad='Alta')
+        data = self._get(prioridad='Alta')
+        self.assertEqual({item['folio'] for item in data['results']}, {self.f_comision.folio})
+        self.assertEqual(data['conteos']['total'], 1)
+        self.assertEqual(data['conteos']['estatus']['Atendido'], 1)
 
 
 class TodosLosChipsSolicitudesTurnadasFiltranCorrectoTests(APITestCase):
     """MisTurnadosView — mismo objetivo que el test anterior, pero del lado
-    de Rol 2: Recibido, En_seguimiento, Concluido, Pendiente_validacion /
-    Rechazado (viven en FUS.estatusParticular, no en Turnado.estatusTitular),
-    Vencido, Por vencer y Prioridad."""
+    de Rol 2: Recibido, En_seguimiento, Pendiente_validacion, Rechazado y
+    Concluido (todos por Turnado.estatusTitular, el que muestra su tarjeta),
+    el grupo Plazo (Vencido, Por vencer) y Prioridad (solo por enlace)."""
 
     @classmethod
     def setUpTestData(cls):
@@ -2000,9 +2485,14 @@ class TodosLosChipsSolicitudesTurnadasFiltranCorrectoTests(APITestCase):
         self.assertEqual(self._folios(estatusTitular='Rechazado'), {self.t_rechazado.idFus.folio})
 
     def test_chip_vencido(self):
-        self.assertEqual(self._folios(estatusTitular='Vencido'), {self.t_vencido.idFus.folio})
+        self.assertEqual(self._folios(plazo='Vencido'), {self.t_vencido.idFus.folio})
 
     def test_chip_por_vencer(self):
+        self.assertEqual(self._folios(plazo='PorVencer'), {self.t_por_vencer.idFus.folio})
+
+    def test_plazo_tambien_se_acepta_dentro_de_estatustitular(self):
+        # Enlaces viejos de los dashboards mandan Vencido/PorVencer en `filtro`.
+        self.assertEqual(self._folios(estatusTitular='Vencido'), {self.t_vencido.idFus.folio})
         self.assertEqual(self._folios(estatusTitular='PorVencer'), {self.t_por_vencer.idFus.folio})
 
     def test_chip_prioridad(self):
@@ -2011,7 +2501,140 @@ class TodosLosChipsSolicitudesTurnadasFiltranCorrectoTests(APITestCase):
 
     def test_conteos_coinciden_con_lo_que_cada_chip_realmente_devuelve(self):
         resp = self.client.get('/api/turnados/mis-turnados/', {'estatusTitular': 'Recibido'})
-        conteos = resp.data['conteos']['estatus']
-        for clave in ('Recibido', 'En_seguimiento', 'Concluido', 'Pendiente_validacion', 'Rechazado', 'Vencido', 'PorVencer'):
+        conteos = resp.data['conteos']
+        for clave in ('Recibido', 'En_seguimiento', 'Concluido', 'Pendiente_validacion', 'Rechazado'):
             with self.subTest(clave=clave):
-                self.assertEqual(conteos[clave], len(self._folios(estatusTitular=clave)))
+                self.assertEqual(conteos['estatus'][clave], len(self._folios(estatusTitular=clave)))
+        # El plazo cuenta dentro del estatus elegido (Recibido), no sobre todo.
+        for plazo in ('Vencido', 'PorVencer'):
+            with self.subTest(plazo=plazo):
+                self.assertEqual(
+                    conteos['plazo'][plazo],
+                    len(self._folios(estatusTitular='Recibido', plazo=plazo)),
+                )
+
+
+class ChipsDeEstatusSumanElTotalRol2Tests(APITestCase):
+    """Solicitudes turnadas (Rol 2): cada turnado cae en UN solo chip de estatus
+    (Turnado.estatusTitular, el que muestra su tarjeta), así que los chips suman
+    el total. Vencido / Por vencer son un grupo aparte ("Plazo") que cruza los
+    estatus. Cubre el caso que antes quedaba fuera de todos los chips: con
+    varias personas turnadas, el rechazo/validación de UNA sola vive solo en su
+    turnado (el FUS conserva su estatus)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.medio = MedioRecepcion.objects.create(nombreMedio='Correo electrónico', paraTurnado=1)
+        cls.rol1 = User.objects.create_user(username='sumar2rol1@t.mx', email='sumar2rol1@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='sumar2rol1@t.mx', nombre='Rol1', rol='ROL1', activo=1)
+        cls.rol2 = User.objects.create_user(username='sumar2rol2@t.mx', email='sumar2rol2@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='sumar2rol2@t.mx', nombre='Rol2', rol='ROL2', activo=1)
+        cls.colega = User.objects.create_user(username='sumar2colega@t.mx', email='sumar2colega@t.mx', password='x')
+        CorreoAutorizado.objects.create(email='sumar2colega@t.mx', nombre='Colega', rol='ROL2', activo=1)
+
+        ahora = timezone.now()
+        pasado, en_cinco_horas = ahora - timedelta(days=3), ahora + timedelta(hours=5)
+
+        def crear(n, estatus_fus, mio, colega=None, prioridad='Media', limite=None):
+            fus = FUS.objects.create(
+                folio=f'ANAM/PARTICULAR/FUS/{4000 + n}/2026', idSolicitanteInterno=cls.rol1,
+                descripcion='x', contexto='', estatusParticular_id=estatus_fus,
+                idUsuarioRegistra=cls.rol1.id, prioridad=prioridad, fechaLimite=limite,
+            )
+            turnado = Turnado.objects.create(
+                idFus=fus, idRemitente=cls.rol1, idDestinatario=cls.rol2,
+                idMedio=cls.medio, estatusTitular_id=mio, activo=1,
+            )
+            if colega:
+                Turnado.objects.create(
+                    idFus=fus, idRemitente=cls.rol1, idDestinatario=cls.colega,
+                    idMedio=cls.medio, estatusTitular_id=colega, activo=1,
+                )
+            return turnado
+
+        cls.t_recibido  = crear(1, 'Turnado', 'Recibido', prioridad='Alta')
+        cls.t_seguim    = crear(2, 'Atendido', 'En_seguimiento', limite=pasado)
+        # Varias personas: el FUS sigue 'Atendido' pero MI parte fue rechazada.
+        cls.t_rech_pers = crear(3, 'Atendido', 'Rechazado', colega='En_seguimiento')
+        # Varias personas: MI parte está enviada a validar; el FUS sigue 'Atendido'.
+        cls.t_valid_pers = crear(4, 'Atendido', 'Pendiente_validacion', colega='En_seguimiento')
+        # Rechazo del FUS completo (espejado en el turnado) y vencido.
+        cls.t_rech_fus  = crear(5, 'Rechazado', 'Rechazado', limite=pasado)
+        # Mi parte concluida aunque el FUS siga abierto (la otra persona pendiente),
+        # con límite vencido: para MÍ el plazo ya no aplica.
+        cls.t_concl_pers = crear(6, 'Atendido', 'Concluido', colega='En_seguimiento', limite=pasado)
+        cls.t_validar   = crear(7, 'Pendiente_validacion', 'Pendiente_validacion', limite=en_cinco_horas)
+        cls.t_concluido = crear(8, 'Concluido', 'Concluido', limite=pasado)
+
+    def setUp(self):
+        self.client.force_authenticate(user=self.rol2)
+
+    def _get(self, **params):
+        resp = self.client.get('/api/turnados/mis-turnados/', params)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        return resp.data
+
+    def _folios(self, **params):
+        return {item['idFus']['folio'] for item in self._get(**params)['results']}
+
+    def test_los_chips_de_estatus_suman_el_total(self):
+        conteos = self._get()['conteos']
+        self.assertEqual(
+            conteos['estatus'],
+            {
+                'Recibido': 1, 'En_seguimiento': 1, 'Pendiente_validacion': 2,
+                'Rechazado': 2, 'Concluido': 2,
+            },
+        )
+        self.assertEqual(conteos['total'], 8)
+        self.assertEqual(sum(conteos['estatus'].values()), conteos['total'])
+
+    def test_cada_turnado_esta_en_el_chip_que_dice_su_tarjeta(self):
+        for item in self._get()['results']:
+            with self.subTest(folio=item['idFus']['folio'], estatus=item['estatusTitular']):
+                self.assertIn(item['idFus']['folio'], self._folios(estatusTitular=item['estatusTitular']))
+
+    def test_rechazo_y_validacion_de_una_sola_persona_aparecen_en_su_chip(self):
+        self.assertEqual(
+            self._folios(estatusTitular='Rechazado'),
+            {self.t_rech_pers.idFus.folio, self.t_rech_fus.idFus.folio},
+        )
+        self.assertEqual(
+            self._folios(estatusTitular='Pendiente_validacion'),
+            {self.t_valid_pers.idFus.folio, self.t_validar.idFus.folio},
+        )
+
+    def test_plazo_cruza_los_estatus_y_no_cuenta_mi_parte_concluida(self):
+        self.assertEqual(self._folios(plazo='Vencido'), {self.t_seguim.idFus.folio, self.t_rech_fus.idFus.folio})
+        self.assertEqual(self._folios(plazo='PorVencer'), {self.t_validar.idFus.folio})
+
+    def test_plazo_se_combina_con_el_estatus_elegido(self):
+        self.assertEqual(
+            self._folios(estatusTitular='Rechazado', plazo='Vencido'), {self.t_rech_fus.idFus.folio},
+        )
+        self.assertEqual(self._folios(estatusTitular='Concluido', plazo='Vencido'), set())
+
+    def test_cada_grupo_cuenta_sobre_el_filtro_del_otro(self):
+        conteos = self._get(estatusTitular='Rechazado')['conteos']
+        self.assertEqual(conteos['plazo'], {'Vencido': 1, 'PorVencer': 0})
+        conteos = self._get(plazo='Vencido')['conteos']
+        self.assertEqual(conteos['estatus']['En_seguimiento'], 1)
+        self.assertEqual(conteos['estatus']['Rechazado'], 1)
+        self.assertEqual(conteos['total'], 2)
+        self.assertEqual(sum(conteos['estatus'].values()), conteos['total'])
+
+    def test_orden_prioridad_alta_primero_y_luego_lo_ultimo_que_cambio(self):
+        def folios():
+            return [item['idFus']['folio'] for item in self._get()['results']]
+
+        self.assertEqual(folios()[0], self.t_recibido.idFus.folio)  # la única Alta
+
+        # Un cambio en el turnado de una no-Alta la sube al inicio de su grupo,
+        # pero sin pasar por encima de las prioridades Alta.
+        self.t_seguim.idUsuarioModifica = self.rol1.id
+        self.t_seguim.save()
+        self.assertEqual(folios()[:2], [self.t_recibido.idFus.folio, self.t_seguim.idFus.folio])
+
+        # Y un cambio en el FUS (p. ej. una prórroga) también cuenta como cambio.
+        self.t_concluido.idFus.save()
+        self.assertEqual(folios()[:2], [self.t_recibido.idFus.folio, self.t_concluido.idFus.folio])

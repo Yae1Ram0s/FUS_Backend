@@ -286,6 +286,7 @@ class Bitacora(models.Model):
         ('ATENCION_FUS', 'Atención de FUS (comisionado)'),
         ('APROBACION_FUS', 'Aprobación de FUS'),
         ('RECHAZO_FUS', 'Rechazo de FUS'),
+        ('PRORROGA_FUS', 'Prórroga de fecha límite'),
     ]
 
     fusFolio = models.CharField(max_length=100, null=True, blank=True, db_column='fus_folio')
@@ -317,6 +318,8 @@ class Notificacion(models.Model):
         ('CAMBIO_ESTADO', 'Cambio de estado'),
         ('CONCLUIDO', 'FUS Concluido'),
         ('SLA_POR_VENCER', 'SLA por vencer'),
+        ('SLA_VENCIDO', 'SLA vencido'),
+        ('PRORROGA_FUS', 'Prórroga de fecha límite'),
         ('ACTIVIDAD', 'Actividad de calendario'),
         ('ASIGNADO_COMISIONADO', 'FUS asignado a comisionado'),
         ('SEGUIMIENTO_FINALIZADO', 'Seguimiento finalizado'),

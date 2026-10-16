@@ -20,6 +20,8 @@ TIPO_EVENTO_ASUNTO = {
     'RESPUESTA': 'Nueva respuesta registrada — {folio}',
     'CONCLUIDO': 'FUS concluido — {folio}',
     'SLA_POR_VENCER': 'FUS por vencer — {folio}',
+    'SLA_VENCIDO': 'FUS vencido — {folio}',
+    'PRORROGA_FUS': 'Prórroga de fecha límite — {folio}',
     'ACTIVIDAD': 'Nueva actividad en tu calendario',
     'ASIGNADO_COMISIONADO': 'Se te asignó un FUS — {folio}',
     'SEGUIMIENTO_FINALIZADO': (

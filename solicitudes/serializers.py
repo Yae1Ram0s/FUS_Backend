@@ -4,6 +4,7 @@ from catalogos.models import MedioRecepcion
 from .models import FUS, Evidencia, Turnado, Seguimiento, Notificacion, Bitacora, Actividad, SeguimientoRespuesta
 from .utils import resolver_nombre, get_rol, es_marcador_atendido_o_concluido
 from .helpers import _resolver_unidad_administrativa
+from .estatus_efectivo import estatus_visual
 from .permissions import _unidad_id
 from .services.bitacora import estados_visibles_bitacora
 
@@ -79,10 +80,12 @@ class FUSSerializer(serializers.ModelSerializer):
         simplemente "Turnado" (el estado agregado del FUS), no un estado
         aparte que no significa nada nuevo todavía. Con varias personas se
         conserva el estado agregado del FUS."""
-        turnados_activos = [t for t in obj.turnados.all() if t.activo]
-        if len(turnados_activos) == 1 and turnados_activos[0].estatusTitular_id != 'Recibido':
-            return turnados_activos[0].estatusTitular_id
-        return obj.estatusParticular_id
+        # La regla vive en estatus_efectivo.py — es la misma que usan los
+        # chips y sus conteos, para que tarjeta y chip nunca se contradigan.
+        return estatus_visual(
+            obj.estatusParticular_id,
+            [t.estatusTitular_id for t in obj.turnados.all() if t.activo],
+        )
 
     def get_evidencias(self, obj):
         # `.all()` + filtro en Python (no `.filter()`, que ignoraría el
@@ -338,6 +341,34 @@ class RechazarSolicitudSerializer(serializers.Serializer):
         return attrs
 
 
+class ProrrogaFUSSerializer(serializers.Serializer):
+    """Valida una prórroga de fecha límite: el FUS debe seguir abierto y tener
+    ya un límite, la nueva fecha debe ser futura y posterior a la actual, y se
+    exige un motivo (queda en bitácora y en el aviso). Requiere `fus` en el
+    context. El efecto lo aplica la vista."""
+
+    fechaLimite = serializers.DateTimeField()
+    motivo      = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def validate(self, attrs):
+        from django.utils import timezone
+        fus = self.context['fus']
+        if fus.estatusParticular_id == 'Concluido':
+            raise serializers.ValidationError('La solicitud ya está concluida, no admite prórroga.')
+        if not fus.fechaLimite:
+            raise serializers.ValidationError('La solicitud no tiene fecha límite que prorrogar.')
+        nueva = attrs['fechaLimite']
+        if nueva <= timezone.now():
+            raise serializers.ValidationError('La nueva fecha límite debe ser posterior al momento actual.')
+        if nueva <= fus.fechaLimite:
+            raise serializers.ValidationError('La nueva fecha límite debe ser posterior a la fecha límite actual.')
+        motivo = (attrs.get('motivo') or '').strip()
+        if not motivo:
+            raise serializers.ValidationError('Debes escribir el motivo de la prórroga.')
+        attrs['motivo'] = motivo
+        return attrs
+
+
 class NotificacionSerializer(serializers.ModelSerializer):
     tipo          = serializers.CharField(source='tipoEvento')
     fechaCreacion = serializers.DateTimeField(source='fechaGeneracion')
@@ -391,14 +422,32 @@ class BitacoraSerializer(serializers.ModelSerializer):
 class ActividadSerializer(serializers.ModelSerializer):
     fusFolio           = serializers.SerializerMethodField()
     participantesInfo  = serializers.SerializerMethodField()
+    vencido            = serializers.SerializerMethodField()
 
     class Meta:
         model  = Actividad
         fields = [
             'id', 'titulo', 'fecha', 'horaInicio', 'horaFin', 'descripcion', 'tipo',
             'idCreador', 'idFusRelacionado', 'participantes', 'fechaCreacion',
-            'fusFolio', 'participantesInfo',
+            'fusFolio', 'participantesInfo', 'vencido',
         ]
+
+    def get_vencido(self, obj):
+        """True si es un límite (tipo 'limite') que ya venció: con FUS ligado,
+        cuando la fecha límite vigente del FUS ya pasó (el listado ya excluye
+        los FUS concluidos); sin FUS, cuando el propio horario ya terminó. Las
+        reuniones y demás actividades nunca se consideran vencidas."""
+        from datetime import datetime
+        from django.utils import timezone
+        if obj.tipo != 'limite':
+            return False
+        ahora = timezone.now()
+        fus = obj.idFusRelacionado
+        if fus:
+            return bool(fus.activo and fus.fechaLimite and fus.fechaLimite < ahora
+                        and fus.estatusParticular_id != 'Concluido')
+        fin = timezone.make_aware(datetime.combine(obj.fecha, obj.horaFin))
+        return fin < ahora
 
     def get_fusFolio(self, obj):
         return obj.idFusRelacionado.folio if obj.idFusRelacionado else None

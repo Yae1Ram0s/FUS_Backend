@@ -1,6 +1,7 @@
 from django.contrib.auth.models import User
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Case, Count, IntegerField, Q, Value, When
+from django.db.models.functions import Coalesce, Greatest
 from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -12,6 +13,7 @@ from rest_framework.permissions import IsAuthenticated
 
 from autenticacion.models import CorreoAutorizado
 from catalogos.models import MedioRecepcion, Estatus
+from ..estatus_efectivo import PLAZOS, debe_quedar_rechazado, q_plazo, separar_estatus_y_plazo
 from ..models import FUS, Turnado, Seguimiento, Notificacion, Actividad, Bitacora, SeguimientoRespuesta
 from ..serializers import (
     TurnadoSerializer, TurnadoActividadSerializer, SeguimientoSerializer,
@@ -375,28 +377,20 @@ class FUSTrazabilidadView(APIView):
 
 # ── Turnados (ROL2) ──────────────────────────────────────────────────────────
 
-def _q_estatus_titular_turnado(clave):
-    """Arma el Q() de un solo estatus/temporalidad para Turnado.estatusTitular
-    — factorizado de MisTurnadosView.get para reusarlo tal cual al filtrar
-    (varios claves con OR) y al calcular los conteos por chip (uno a la vez,
-    sobre el queryset sin el propio filtro de estatus/prioridad aplicado)."""
-    if clave == 'Vencido':
-        # Indicador de temporalidad, no de estatus: por fechaLimite, sin
-        # importar en qué estatus del trámite esté el FUS — salvo Concluido,
-        # ya cerrado, donde la temporalidad deja de aplicar (mismo criterio
-        # que FUSSerializer.get_estadoTemporalidad).
-        return Q(idFus__fechaLimite__lt=timezone.now()) & ~Q(idFus__estatusParticular_id='Concluido')
-    if clave == 'PorVencer':
-        from datetime import timedelta
-        ahora = timezone.now()
-        return Q(
-            idFus__fechaLimite__gte=ahora, idFus__fechaLimite__lte=ahora + timedelta(hours=24),
-        ) & ~Q(idFus__estatusParticular_id='Concluido')
-    if clave in ('Rechazado', 'Pendiente_validacion'):
-        # Viven en FUS.estatusParticular, no en Turnado.estatusTitular — el
-        # sidebar de ROL2 los ofrece bajo el mismo parámetro `estatusTitular`.
-        return Q(idFus__estatusParticular_id=clave)
-    return Q(estatusTitular_id=clave)
+# Chips de estatus de ROL2, en orden de flujo. Cada fila de su bandeja es SU
+# turnado y el estatus que ve en la tarjeta es siempre Turnado.estatusTitular,
+# así que ese mismo campo decide a qué chip pertenece: un turnado cae en uno
+# solo y los chips suman el total. (Antes Rechazado/Pendiente_validacion se
+# buscaban en FUS.estatusParticular: con varias personas turnadas, el rechazo
+# o la validación de UNA sola no aparecía en ningún chip.)
+CHIPS_ESTATUS_TITULAR = ('Recibido', 'En_seguimiento', 'Pendiente_validacion', 'Rechazado', 'Concluido')
+
+
+def _q_plazo_turnado(plazos):
+    """Plazo (Vencido/Por vencer) sobre la fechaLimite del FUS, sin contar la
+    parte que esta persona ya tiene Concluida — su plazo dejó de aplicar aunque
+    otras personas del mismo FUS sigan pendientes."""
+    return q_plazo(plazos, 'idFus__fechaLimite', Q(estatusTitular_id='Concluido'))
 
 
 class MisTurnadosView(APIView):
@@ -411,6 +405,7 @@ class MisTurnadosView(APIView):
         ).prefetch_related('idFus__turnados__idDestinatario', 'idFus__evidencias')
 
         estatus_raw = request.query_params.get('estatusTitular')
+        plazo_raw   = request.query_params.get('plazo')
         prioridad   = request.query_params.get('prioridad')
         search      = request.query_params.get('search')
         folio       = request.query_params.get('folio')
@@ -445,42 +440,60 @@ class MisTurnadosView(APIView):
                 Q(seguimientos__accionTexto__icontains=search)
             ).distinct()
 
-        # Snapshot previo a los filtros de chip (estatus/prioridad): de aquí
-        # salen los conteos por chip que ve el frontend — si se calcularan
-        # sobre `qs` ya filtrado por el chip activo, los DEMÁS chips
-        # mostrarían siempre 0 en cuanto se selecciona uno (justo el bug
-        # reportado). Sí respeta folio/search/scope de rol, para que los
-        # conteos coincidan con la bandeja que el usuario está viendo.
-        qs_sin_chip = qs
-
-        # Mismos chips que arma SolicitudesTurnadas.jsx (useEstatus('TITULAR'),
-        # que en el backend trae TITULAR + AMBOS — ver EstatusListView) más
-        # Pendiente_validacion/Rechazado (viven en FUS, no en el catálogo
-        # TITULAR) y las dos temporalidades.
-        claves_chip = ['Pendiente_validacion', 'Rechazado', 'Vencido', 'PorVencer'] + list(
-            Estatus.objects.filter(tipoFlujo__in=['TITULAR', 'AMBOS'], activa=True).values_list('clave', flat=True)
-        )
-        conteos_estatus = {
-            clave: qs_sin_chip.filter(_q_estatus_titular_turnado(clave)).count()
-            for clave in claves_chip
-        }
-        conteos_prioridad = {
-            valor: qs_sin_chip.filter(idFus__prioridad=valor).count()
-            for valor in ('Alta', 'Media', 'Baja')
-        }
-
+        # La prioridad ya no tiene chip (solo llegaba por enlace desde el
+        # dashboard), pero se aplica ANTES de los conteos: así chips y lista
+        # hablan siempre del mismo conjunto de turnados.
         if prioridad:
             qs = qs.filter(idFus__prioridad=prioridad)
-        if estatus_raw:
-            # Uno o varios chips a la vez (ej. "Recibido,En_seguimiento") — se
-            # combinan con OR, ya que un turnado solo puede estar en un
-            # estatus: seleccionar varios amplía la bandeja, no la reduce.
-            q_estatus = Q()
-            for estatus in {e.strip() for e in estatus_raw.split(',') if e.strip()}:
-                q_estatus |= _q_estatus_titular_turnado(estatus)
-            qs = qs.filter(q_estatus)
 
-        qs = qs.order_by('-fechaRegistro')
+        # Dos grupos de chips, independientes entre sí (mismo esquema que
+        # Consultar FUS de ROL1):
+        #  * Estatus (exclusivos: cada turnado cae en uno solo, la suma da el
+        #    total). Uno o varios a la vez se combinan con OR — un turnado solo
+        #    tiene un estatus, así que seleccionar varios amplía la bandeja.
+        #  * Plazo (Vencido / Por vencer): temporalidad que cruza los
+        #    estatus; se combina con el estatus elegido (AND).
+        # Cada grupo cuenta sobre el filtro del OTRO grupo, no sobre el suyo
+        # — si no, al elegir un chip los demás se verían en 0.
+        estatus_pedidos, plazos = separar_estatus_y_plazo(estatus_raw, plazo_raw)
+        q_estatus = Q(estatusTitular_id__in=estatus_pedidos) if estatus_pedidos else Q()
+        filtro_plazo = _q_plazo_turnado(plazos)
+
+        # Los 5 chips del flujo más cualquier otro estatus activo del catálogo
+        # TITULAR/AMBOS (ver EstatusListView), para no esconder uno nuevo.
+        claves_chip = list(dict.fromkeys(
+            CHIPS_ESTATUS_TITULAR + tuple(
+                Estatus.objects.filter(tipoFlujo__in=['TITULAR', 'AMBOS'], activa=True)
+                .values_list('clave', flat=True)
+            )
+        ))
+        por_estatus = dict(
+            qs.filter(filtro_plazo).order_by()
+            .values_list('estatusTitular_id').annotate(n=Count('pk', distinct=True))
+        )
+        conteos_estatus = {clave: por_estatus.get(clave, 0) for clave in claves_chip}
+        conteos_plazo = {
+            plazo: qs.filter(q_estatus).filter(_q_plazo_turnado([plazo])).distinct().count()
+            for plazo in PLAZOS
+        }
+        conteo_total = sum(por_estatus.values())
+
+        qs = qs.filter(q_estatus).filter(filtro_plazo)
+
+        # Orden de la bandeja: primero prioridad Alta; dentro de cada grupo, lo
+        # que cambió más recientemente va arriba. "Cambio" = la última
+        # modificación de este turnado o de su FUS (marcar atendido, rechazar,
+        # prórroga…), con fechaRegistro de respaldo para filas sin fechas.
+        qs = qs.annotate(
+            _alta_primero=Case(
+                When(idFus__prioridad='Alta', then=Value(0)),
+                default=Value(1), output_field=IntegerField(),
+            ),
+            _ultimo_cambio=Greatest(
+                Coalesce('fechaModificacion', 'fechaRegistro'),
+                Coalesce('idFus__fechaModificacion', 'idFus__fechaRegistro'),
+            ),
+        ).order_by('_alta_primero', '-_ultimo_cambio', '-fechaRegistro', '-pk')
 
         # Paginación
         try:
@@ -496,7 +509,7 @@ class MisTurnadosView(APIView):
         data   = TurnadoSerializer(pagina, many=True, context={'mapa_correos': mapa}).data
         return Response({
             'total': total, 'page': page, 'page_size': page_size, 'results': data,
-            'conteos': {'estatus': conteos_estatus, 'prioridad': conteos_prioridad},
+            'conteos': {'total': conteo_total, 'estatus': conteos_estatus, 'plazo': conteos_plazo},
         })
 
 
@@ -749,6 +762,21 @@ class RechazarPersonaTurnadoView(APIView):
         turnado.estatusTitular_id = 'Rechazado'
         turnado.idUsuarioModifica = user.id
         turnado.save()
+
+        # Si era la única persona activa (o ya todas están rechazadas), el FUS
+        # completo queda 'Rechazado' — igual que RechazarSolicitudView — en vez
+        # de conservar 'Atendido'/'Pendiente_validacion' con su turnado
+        # rechazado. La nueva respuesta del Titular lo reabre desde ahí (ver
+        # SeguimientoListCreateView). Con varias personas, el rechazo de una
+        # sola no cambia el estatus del FUS.
+        fus = FUS.objects.select_for_update().get(pk=fus.pk)
+        estatus_turnados = list(
+            fus.turnados.filter(activo=1).values_list('estatusTitular_id', flat=True)
+        )
+        if debe_quedar_rechazado(fus.estatusParticular_id, estatus_turnados):
+            fus.estatusParticular_id = 'Rechazado'
+            fus.idUsuarioModifica = user.id
+            fus.save()
 
         Seguimiento.objects.create(
             idTurnado=turnado,

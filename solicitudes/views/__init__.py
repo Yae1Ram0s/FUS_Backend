@@ -11,6 +11,7 @@ from .comisionado import (
     ConcluirAsuntoView,
     FUSComisionadosDisponiblesView,
     MisFUSComisionadosView,
+    ProrrogaFUSView,
     RechazarSolicitudView,
     SeguimientoComisionadoListCreateView,
 )
@@ -84,6 +85,7 @@ __all__ = [
     'NotificacionListView',
     'NotificacionMarcarLeidaView',
     'NotificacionMarcarTodasView',
+    'ProrrogaFUSView',
     'PushDesuscribirView',
     'PushSuscribirView',
     'VapidPublicKeyView',

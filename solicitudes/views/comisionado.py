@@ -13,6 +13,7 @@ from ..models import FUS, Actividad, Bitacora, Notificacion, SeguimientoRespuest
 from ..serializers import (
     FUSSerializer, SeguimientoRespuestaSerializer, SeguimientoComisionadoCreateSerializer,
     ComisionarFUSSerializer, AtendidoFUSSerializer, ConcluirAsuntoSerializer, RechazarSolicitudSerializer,
+    ProrrogaFUSSerializer,
 )
 from ..permissions import (
     _unidad_id,
@@ -507,6 +508,94 @@ class RechazarSolicitudView(APIView):
                     fusFolio=fus.folio,
                     tipoEvento='SOLICITUD_RECHAZADA',
                     mensaje=f"El FUS {fus.folio} fue rechazado: {motivo}. Vuelve a consultarlo para reabrirlo a seguimiento.",
+                )
+                for dest in destinatarios
+            ]
+
+        for notif in notificaciones:
+            push_notificacion(notif)
+        notificar_por_correo_lote(notificaciones)
+
+        return Response(FUSSerializer(fus).data)
+
+
+class ProrrogaFUSView(APIView):
+    """POST {fechaLimite, motivo} — el Particular (ROL1) dueño del FUS (o su
+    EQUIPO_PARTICULAR) amplía la fecha límite, ya sea porque el asunto venció
+    o porque está por vencer. Reprograma el recordatorio "Vence FUS" del
+    calendario (conservando a sus participantes), deja constancia en bitácora
+    y avisa al resto de los involucrados."""
+    permission_classes = [IsAuthenticated, EsRol1DuenoDelFUS]
+
+    @transaction.atomic
+    def post(self, request, pk):
+        fus = get_object_or_404(FUS.objects.select_for_update(), pk=pk, activo=1)
+        self.check_object_permissions(request, fus)
+
+        ser = ProrrogaFUSSerializer(data=request.data, context={'fus': fus})
+        if not ser.is_valid():
+            return Response({'detail': _primer_error(ser)}, status=400)
+
+        nueva  = ser.validated_data['fechaLimite']
+        motivo = ser.validated_data['motivo']
+        user   = request.user
+        ip     = request.META.get('REMOTE_ADDR')
+        limite_anterior = timezone.localtime(fus.fechaLimite).strftime('%d/%m/%Y %H:%M')
+        limite_nuevo    = timezone.localtime(nueva).strftime('%d/%m/%Y %H:%M')
+
+        with transaction.atomic():
+            fus.fechaLimite = nueva
+            fus.idUsuarioModifica = user.id
+            fus.save()
+
+            # localtime() antes de partir en fecha/hora (México es UTC-6), igual
+            # que al registrar/editar/turnar. No se toca idCreador ni los
+            # participantes de un recordatorio que ya existía.
+            limite_local = timezone.localtime(nueva)
+            Actividad.objects.update_or_create(
+                idFusRelacionado=fus, tipo='limite',
+                defaults={
+                    'titulo': f"Vence FUS: {fus.folio}",
+                    'fecha': limite_local.date(),
+                    'horaInicio': limite_local.time(),
+                    'horaFin': limite_local.time(),
+                    'activo': 1,
+                },
+                create_defaults={
+                    'titulo': f"Vence FUS: {fus.folio}",
+                    'fecha': limite_local.date(),
+                    'horaInicio': limite_local.time(),
+                    'horaFin': limite_local.time(),
+                    'idCreador': user,
+                    'activo': 1,
+                },
+            )
+
+            _log(usuario=user.email, rol=_rol(user), accion='PRORROGA_FUS',
+                 ip=ip, folio=fus.folio, estado_ant=fus.estatusParticular_id,
+                 estado_nuevo=fus.estatusParticular_id,
+                 obs=f'Prórroga: {limite_anterior} → {limite_nuevo}. Motivo: {motivo}')
+
+            destinatarios = set()
+            if fus.idComisionado_id:
+                destinatarios.add(fus.idComisionado)
+            for turnado in fus.turnados.filter(activo=1).select_related('idDestinatario'):
+                if turnado.idDestinatario_id:
+                    destinatarios.add(turnado.idDestinatario)
+            if fus.idSolicitanteInterno_id:
+                destinatarios.add(fus.idSolicitanteInterno)
+                destinatarios |= set(_equipo_particular_de(fus.idSolicitanteInterno))
+            destinatarios.discard(user)
+
+            notificaciones = [
+                Notificacion.objects.create(
+                    idDestinatario=dest,
+                    fusFolio=fus.folio,
+                    tipoEvento='PRORROGA_FUS',
+                    mensaje=(
+                        f"Se amplió la fecha límite del FUS {fus.folio}: "
+                        f"{limite_anterior} → {limite_nuevo}. Motivo: {motivo}"
+                    ),
                 )
                 for dest in destinatarios
             ]
