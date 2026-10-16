@@ -199,7 +199,7 @@ class OTPFlowAPITests(APITestCase):
         otp = CodigoOTP.objects.get(email=self.email, codigo='555555')
         self.assertEqual(otp.usado, 1)
 
-    @patch('autenticacion.views.enviar_correo_otp')
+    @patch('autenticacion.views.enviar_correo_otp_rapido')
     def test_verificar_correo_con_usuario_sin_password_inicia_activacion(self, enviar_mock):
         user = User(username=self.email, email=self.email)
         user.set_unusable_password()
@@ -239,3 +239,45 @@ class OTPFlowAPITests(APITestCase):
             'email': self.email, 'codigo': '555555', 'password': 'NuevaPass!2026',
         })
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class EnviarCorreoOtpRapidoTests(TestCase):
+    """enviar_correo_otp_rapido — la respuesta no espera a un SMTP lento, pero
+    un envío rápido (o un error rápido) se comporta igual que antes."""
+
+    ARGS = ('a@anam.gob.mx', '123456', 'intro', 'asunto')
+
+    def test_envio_rapido_devuelve_el_resultado(self):
+        from autenticacion.emails import enviar_correo_otp_rapido
+        with patch('autenticacion.emails.enviar_correo_otp', return_value=1) as envio:
+            self.assertEqual(enviar_correo_otp_rapido(*self.ARGS), 1)
+        envio.assert_called_once_with(*self.ARGS)
+
+    def test_error_rapido_se_propaga_como_antes(self):
+        from autenticacion.emails import enviar_correo_otp_rapido
+        with patch('autenticacion.emails.enviar_correo_otp', side_effect=OSError('smtp caído')):
+            with self.assertRaises(OSError):
+                enviar_correo_otp_rapido(*self.ARGS)
+
+    def test_envio_lento_no_hace_esperar_a_la_respuesta(self):
+        import threading
+        import time
+
+        from autenticacion.emails import enviar_correo_otp_rapido
+
+        liberar = threading.Event()
+        terminado = threading.Event()
+
+        def lento(*args):
+            liberar.wait(timeout=5)
+            terminado.set()
+            return 1
+
+        with patch('autenticacion.emails.enviar_correo_otp', side_effect=lento):
+            inicio = time.monotonic()
+            resultado = enviar_correo_otp_rapido(*self.ARGS, espera=0.2)
+            transcurrido = time.monotonic() - inicio
+            self.assertIsNone(resultado)           # sigue en curso al responder
+            self.assertLess(transcurrido, 1.5)     # no esperó al envío
+            liberar.set()
+            self.assertTrue(terminado.wait(timeout=5))  # el envío sí termina en segundo plano

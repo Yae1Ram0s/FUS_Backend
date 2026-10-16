@@ -531,7 +531,10 @@ class FUSDetalleAuditoriaView(APIView):
                 'nombre': resolver_nombre(sol) if sol else None,
                 'email': sol.email if sol else None,
             },
-            'evidencias': [{'nombreArchivo': e.nombreArchivo} for e in fus.evidencias.filter(activo=1)],
+            'evidencias': [
+                {'id': e.id, 'nombreArchivo': e.nombreArchivo, 'tipoMime': e.tipoMime, 'comentarios': e.comentarios}
+                for e in fus.evidencias.filter(activo=1)
+            ],
             'seguimientos': seguimientos,
         })
 

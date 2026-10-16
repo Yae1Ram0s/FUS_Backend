@@ -81,3 +81,41 @@ def enviar_correo_otp(email, codigo, intro, asunto):
             otp.detalleEnvio = f'Error de correo: {exc.__class__.__name__}'[:160]
             otp.save(update_fields=['estadoEnvio', 'fechaEnvio', 'detalleEnvio'])
         raise
+
+
+def enviar_correo_otp_rapido(email, codigo, intro, asunto, espera=2.5):
+    """Igual que `enviar_correo_otp`, pero sin dejar la respuesta HTTP
+    esperando a que el servidor de correo conteste.
+
+    El envío corre en un hilo aparte y la petición espera como máximo
+    `espera` segundos: si en ese lapso el envío ya terminó, el resultado (o el
+    error) se comporta exactamente como antes; si el SMTP está lento, la
+    respuesta sale de inmediato y el envío termina en segundo plano — su
+    resultado queda en `CodigoOTP.estadoEnvio`, que el administrador ya puede
+    auditar. Sin esto, un SMTP lento dejaba el botón del login "Verificando…"
+    hasta EMAIL_TIMEOUT (10 s) en el primer ingreso, y se leía como trabado.
+
+    Devuelve lo mismo que `enviar_correo_otp`, o None si el envío sigue en
+    curso al responder."""
+    import threading
+
+    from django.db import connections
+
+    resultado = {}
+
+    def _tarea():
+        try:
+            resultado['enviados'] = enviar_correo_otp(email, codigo, intro, asunto)
+        except Exception as exc:  # se re-lanza en el hilo del request si ya terminó
+            resultado['error'] = exc
+        finally:
+            # Un hilo aparte no pasa por el cierre automático de conexiones de
+            # Django (fin de request): sin esto queda una conexión huérfana.
+            connections.close_all()
+
+    hilo = threading.Thread(target=_tarea, daemon=True)
+    hilo.start()
+    hilo.join(timeout=espera)
+    if 'error' in resultado:
+        raise resultado['error']
+    return resultado.get('enviados')

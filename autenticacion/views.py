@@ -23,7 +23,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 from .models import CorreoAutorizado, CodigoOTP, SeguridadUsuario
 from .admin_services import emitir_tokens
 from .serializers import LoginSerializer, UsuarioROL2Serializer
-from .emails import enviar_correo_otp
+from .emails import enviar_correo_otp_rapido
 from .otp import validar_otp
 from solicitudes.utils import get_rol, log_bitacora as _log
 from catalogos.models import UnidadAdministrativa
@@ -132,7 +132,7 @@ class VerificarCorreoView(APIView):
             return Response({'estado': 'existente'})
 
         codigo = _generar_otp(email, request.META.get('REMOTE_ADDR'))
-        enviar_correo_otp(
+        enviar_correo_otp_rapido(
             email, codigo,
             intro='Recibimos una solicitud de acceso al Sistema de Control de Solicitudes. Utiliza el siguiente código para completar tu inicio de sesión.',
             asunto='Tu código de acceso — Sistema de Control de Solicitudes',
@@ -251,7 +251,7 @@ class ReenviarOTPView(APIView):
             return Response({'detail': 'Este usuario ya tiene cuenta activa.'}, status=status.HTTP_400_BAD_REQUEST)
 
         codigo = _generar_otp(email, request.META.get('REMOTE_ADDR'))
-        enviar_correo_otp(
+        enviar_correo_otp_rapido(
             email, codigo,
             intro='Solicitaste un nuevo código de acceso al Sistema de Control de Solicitudes. Utiliza el siguiente código para completar tu inicio de sesión.',
             asunto='Nuevo código de acceso — Sistema de Control de Solicitudes',
@@ -424,7 +424,7 @@ class RecuperarContrasenaView(APIView):
             return Response({'enviado': True})
 
         codigo = _generar_otp(email, request.META.get('REMOTE_ADDR'))
-        enviar_correo_otp(
+        enviar_correo_otp_rapido(
             email, codigo,
             intro='Recibimos una solicitud para restablecer tu contraseña del Sistema de Control de Solicitudes. Utiliza el siguiente código para continuar.',
             asunto='Recuperación de contraseña — Sistema de Control de Solicitudes',
